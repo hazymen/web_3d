@@ -46,25 +46,41 @@ function init() {
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2); // 色と強さ
     sunLight.position.set(100, 100, 100); // 太陽の位置（高い位置に設定）
     sunLight.castShadow = true; // 影を有効化
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    
+    // 影の範囲を広げる（ここを追加・調整）
+    sunLight.shadow.camera.left = -50;
+    sunLight.shadow.camera.right = 50;
+    sunLight.shadow.camera.top = 50;
+    sunLight.shadow.camera.bottom = -50;
+    sunLight.shadow.camera.near = 1; //影の最短描画範囲
+    sunLight.shadow.camera.far = 200; //影の最長描画範囲
+
+    sunLight.shadow.bias = -0.001;
+    
     scene.add(sunLight);
+   
+
     // 光源を作成
     const light = new THREE.SpotLight(0xffffff, 400, 100, Math.PI / 4, 1);
     light.intensity = 0.0;
     light.position.set(10, 10, 10);
     light.castShadow = true;
-    scene.add(light);
+    // scene.add(light);
 
     const meshFloor = new THREE.Mesh(
-        new THREE.BoxGeometry(100, 0.1, 100),
+        new THREE.PlaneGeometry(100, 100, 1, 1), // 分割数を1に
         new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.0 }),
     );
     // 影を受け付ける
+    meshFloor.rotation.x = -Math.PI / 2; // 水平にする
     meshFloor.position.set(0, 0, 0);
     meshFloor.receiveShadow = true;
     scene.add(meshFloor);
 
 
-    const skyGeometry = new THREE.SphereGeometry(100, 32, 32);
+    const skyGeometry = new THREE.SphereGeometry(100, 8, 8);
     const skyMaterial = new THREE.MeshBasicMaterial({
         color: 0x87ceeb, // 空色
         side: THREE.BackSide // 内側を表示
@@ -75,17 +91,41 @@ function init() {
 
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
-    objLoader.load('models/ak47.obj', function(object) {
-    // モデル内のすべてのMeshに対して影の設定を行う
-        object.traverse(function(child) {
-            if (child.isMesh) {
-                child.castShadow = true;      // 影を落とす
-                child.receiveShadow = true;   // 影を受ける（必要に応じて）
-            }
+    function loadOBJModel(modelName, position) {
+        const objLoader = new THREE.OBJLoader();
+        objLoader.load(`models/${modelName}`, function(object) {
+            object.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            object.position.set(position.x, position.y, position.z);
+            scene.add(object);
         });
-        object.position.set(0, 1, 0);
-        scene.add(object);
-    });
+    }
+
+
+    // 3Dモデルの読み込み（GLB/GLTF）
+    const gltfLoader = new THREE.GLTFLoader();
+    function loadGLBModel(modelName, position) {
+        const gltfLoader = new THREE.GLTFLoader();
+        gltfLoader.load(`models/${modelName}`, function(gltf) {
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            gltf.scene.position.set(position.x, position.y, position.z);
+            scene.add(gltf.scene);
+        });
+    }
+
+    loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
+    
+    loadGLBModel('71.glb', { x: 2, y: 1, z: 0 });
+
 
     document.addEventListener('keydown', (event) => {
         switch (event.code) {
@@ -121,26 +161,86 @@ function init() {
         }
     });
 
+    const controls = new THREE.PointerLockControls(camera, renderer.domElement);
+
+    // 移動速度を調整する変数
+    let moveSpeed = 0.04;
+
+    // マウス感度（回転速度）を調整する変数
+    let mouseSensitivity = 0.5; // 小さいほどゆっくり、大きいほど速い
+
+    controls.pointerSpeed = mouseSensitivity;
+
+    canvasElement.addEventListener('click', () => {
+        controls.lock();
+    });
+
+    const fpsDiv = document.createElement('div');
+    fpsDiv.style.position = 'absolute';
+    fpsDiv.style.left = '10px';
+    fpsDiv.style.top = '10px';
+    fpsDiv.style.color = '#fff';
+    fpsDiv.style.background = 'rgba(0,0,0,0.5)';
+    fpsDiv.style.padding = '4px 8px';
+    fpsDiv.style.fontFamily = 'monospace';
+    fpsDiv.style.fontSize = '14px';
+    fpsDiv.style.zIndex = '100';
+    fpsDiv.innerText = 'FPS: 0';
+    document.body.appendChild(fpsDiv);
+
+    const polyDiv = document.createElement('div');
+    polyDiv.style.position = 'absolute';
+    polyDiv.style.left = '10px';
+    polyDiv.style.top = '34px';
+    polyDiv.style.color = '#fff';
+    polyDiv.style.background = 'rgba(0,0,0,0.5)';
+    polyDiv.style.padding = '4px 8px';
+    polyDiv.style.fontFamily = 'monospace';
+    polyDiv.style.fontSize = '14px';
+    polyDiv.style.zIndex = '100';
+    polyDiv.innerText = 'Polygons: 0';
+    document.body.appendChild(polyDiv);
+
     function animate() {
         requestAnimationFrame(animate);
 
+        frames++;
+        const now = performance.now();
+        if (now - lastTime >= 1000) {
+            fps = frames;
+            frames = 0;
+            lastTime = now;
+            fpsDiv.innerText = `FPS: ${fps}`;
+        }
+
+        const info = renderer.info;
+        polyDiv.innerText = `Polygons: ${info.render.triangles}`;
+
         // 回転
-        if (rotateLeft) camera.rotation.y += rotationSpeed;
-        if (rotateRight) camera.rotation.y -= rotationSpeed;
+        // if (rotateLeft) camera.rotation.y += rotationSpeed;
+        // if (rotateRight) camera.rotation.y -= rotationSpeed;
 
-        // 前進・後退
+        // 前進・後退・左右移動
         const direction = new THREE.Vector3();
-        camera.getWorldDirection(direction);
+        controls.getDirection(direction);
         direction.y = 0; // 水平移動のみ
+        direction.normalize();
 
-        if (moveForward) camera.position.add(direction.multiplyScalar(velocity));
-        if (moveBackward) camera.position.add(direction.multiplyScalar(-velocity));
+        const right = new THREE.Vector3();
+        right.crossVectors(direction, camera.up).normalize();
+
+        if (moveForward) controls.moveForward(moveSpeed);
+        if (moveBackward) controls.moveForward(-moveSpeed);
+        if (rotateRight) controls.moveRight(moveSpeed);
+        if (rotateLeft) controls.moveRight(-moveSpeed);
 
         renderer.render(scene, camera);
     }
-
+    let lastTime = performance.now();
+    let frames = 0;
+    let fps = 0;
     animate();
-    tick();
+    //tick();
 
     function tick() {
         renderer.render(scene, camera); // レンダリング
