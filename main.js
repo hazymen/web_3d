@@ -88,6 +88,14 @@ function init() {
     const sky = new THREE.Mesh(skyGeometry, skyMaterial);
     scene.add(sky);
 
+    let isJumping = false;
+    let velocityY = 0;
+    const gravity = -0.0035;      // 重力加速度（マイナス値）
+    const jumpAccel = 0.008;      // ジャンプ時に加える加速度
+    const jumpDuration = 20;     // ジャンプ加速を加えるフレーム数
+    let jumpFrame = 0;
+    const groundHeight = 1.6;
+
 
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
@@ -105,7 +113,9 @@ function init() {
         });
     }
 
+    const cameraRadius = 0.3;
 
+    const collisionMeshes = [];
     // 3Dモデルの読み込み（GLB/GLTF）
     const gltfLoader = new THREE.GLTFLoader();
     function loadGLBModel(modelName, position) {
@@ -115,6 +125,8 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    // 衝突判定用に配列へ追加
+                    collisionMeshes.push(child);
                 }
             });
             gltf.scene.position.set(position.x, position.y, position.z);
@@ -140,6 +152,13 @@ function init() {
                 break;
             case 'KeyD':
                 rotateRight = true;
+                break;
+            case 'Space':
+                if (!isJumping && Math.abs(controls.getObject().position.y - groundHeight) < 0.05) {
+                    isJumping = true;
+                    velocityY = 0;
+                    jumpFrame = 0;
+                }
                 break;
         }
     });
@@ -200,7 +219,27 @@ function init() {
     polyDiv.style.zIndex = '100';
     polyDiv.innerText = 'Polygons: 0';
     document.body.appendChild(polyDiv);
-
+    
+    function canMove(newPosition) {
+        // 8方向にレイを飛ばしてカメラの半径分の衝突を調べる
+        const directions = [
+            new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0),
+            new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1),
+            new THREE.Vector3(1, 0, 1).normalize(), new THREE.Vector3(-1, 0, 1).normalize(),
+            new THREE.Vector3(1, 0, -1).normalize(), new THREE.Vector3(-1, 0, -1).normalize()
+        ];
+        for (let dir of directions) {
+            const raycaster = new THREE.Raycaster(
+                newPosition, dir, 0, cameraRadius
+            );
+            const intersects = raycaster.intersectObjects(collisionMeshes, true);
+            if (intersects.length > 0) {
+                return false; // どれかに当たったら移動不可
+            }
+        }
+        return true;
+    }
+        
     function animate() {
         requestAnimationFrame(animate);
 
@@ -216,6 +255,23 @@ function init() {
         const info = renderer.info;
         polyDiv.innerText = `Polygons: ${info.render.triangles}`;
 
+        let obj = controls.getObject();
+        if (isJumping) {
+            // ジャンプ開始から一定フレームだけ上向き加速度を加える
+            if (jumpFrame < jumpDuration) {
+                velocityY += jumpAccel;
+                jumpFrame++;
+            }
+            velocityY += gravity; // 毎フレーム重力加速度を加える
+            obj.position.y += velocityY;
+
+            // 地面に着地したら止める
+            if (obj.position.y <= groundHeight) {
+                obj.position.y = groundHeight;
+                isJumping = false;
+                velocityY = 0;
+            }
+        }
         // 回転
         // if (rotateLeft) camera.rotation.y += rotationSpeed;
         // if (rotateRight) camera.rotation.y -= rotationSpeed;
@@ -229,11 +285,29 @@ function init() {
         const right = new THREE.Vector3();
         right.crossVectors(direction, camera.up).normalize();
 
-        if (moveForward) controls.moveForward(moveSpeed);
-        if (moveBackward) controls.moveForward(-moveSpeed);
-        if (rotateRight) controls.moveRight(moveSpeed);
-        if (rotateLeft) controls.moveRight(-moveSpeed);
+        // カメラの現在位置
+        const currentPos = controls.getObject().position.clone();
 
+        // 前進・後退・左右移動のベクトル計算
+        let moveVec = new THREE.Vector3();
+        if (moveForward) moveVec.z -= 1;
+        if (moveBackward) moveVec.z += 1;
+        if (rotateRight) moveVec.x += 1;
+        if (rotateLeft) moveVec.x -= 1;
+        if (moveVec.length() > 0) {
+            moveVec.normalize();
+            // カメラの向きに合わせて移動ベクトルを回転
+            moveVec.applyQuaternion(camera.quaternion);
+            moveVec.y = 0; // 水平移動のみ
+            moveVec.normalize();
+
+            // 移動先を計算
+            const nextPos = currentPos.clone().add(moveVec.clone().multiplyScalar(moveSpeed));
+            // 衝突判定
+            if (canMove(nextPos)) {
+                controls.getObject().position.copy(nextPos);
+            }
+        }
         renderer.render(scene, camera);
     }
     let lastTime = performance.now();
