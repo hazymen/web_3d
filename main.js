@@ -556,38 +556,38 @@ function init() {
             if (carForward) {
                 if (carVelocity < -0.01) {
                     // バック中にW→ブレーキ
-                    carVelocity += carAccel * 2;
+                    carVelocity += carAccel * 2 * delta;
                     if (carVelocity > 0) carVelocity = 0;
                 } else if (carStopped && performance.now() - carStopTime < 200) {
                     // 停止直後は加速しない（200ms待つ）
                     // 何もしない
                 } else {
                     // 前進
-                    carVelocity += carAccel;
+                    carVelocity += carAccel * delta;
                 }
             }
             if (carBackward) {
                 if (carVelocity > 0.01) {
                     // 前進中にS→ブレーキ
-                    carVelocity -= carAccel * 2;
+                    carVelocity -= carAccel * 2 * delta;
                     if (carVelocity < 0) carVelocity = 0;
                 } else if (carStopped && performance.now() - carStopTime < 200) {
                     // 停止直後はバック加速しない（200ms待つ）
                     // 何もしない
                 } else {
                     // 停止またはバック
-                    carVelocity -= carAccel * 0.5
+                    carVelocity -= carAccel * 0.5 * delta;
                 }
             }
             // 速度制限
-            carVelocity = Math.max(-carMaxSpeed, Math.min(carMaxSpeed, carVelocity));
+            carVelocity = Math.max(-carMaxSpeed * delta, Math.min(carMaxSpeed * delta, carVelocity));
             // 摩擦
-            carVelocity *= carFriction;
+            carVelocity *= Math.pow(carFriction, delta * 60); // フレームレートに依存しない摩擦
 
             // ステアリングの最大値を速度に応じて変化させる
             // 例: 20km/h未満で最大値、60km/h以上で最小値、その間は線形補間
-            const minSteer = 0.03; // 高速時の最小ハンドル切れ度
-            const maxSteer = 0.8; // 低速時の最大ハンドル切れ度
+            const minSteer = 0.03;
+            const maxSteer = 0.8;
             const speedKmhForSteer = Math.abs(carVelocity) / delta * 3.6;
 
             let dynamicSteer = maxSteer;
@@ -595,21 +595,20 @@ function init() {
                 if (speedKmhForSteer >= 40) {
                     dynamicSteer = minSteer;
                 } else {
-                    // 20～60km/hの間は線形に変化
                     dynamicSteer = maxSteer - (maxSteer - minSteer) * ((speedKmhForSteer - 20) / 40);
                 }
             }
 
             // ハンドル
-            if (carLeft && !carRight) carSteer = carSteerSpeed;
-            else if (carRight && !carLeft) carSteer = -carSteerSpeed;
+            if (carLeft && !carRight) carSteer = carSteerSpeed * delta;
+            else if (carRight && !carLeft) carSteer = -carSteerSpeed * delta;
             else carSteer = 0;
 
             // 最大ハンドル切れ度を速度依存で適用
             carSteer = Math.max(-dynamicSteer, Math.min(dynamicSteer, carSteer));
 
             // 回転
-            carObject.rotation.y += carSteer * carVelocity;
+            carObject.rotation.y += carSteer * (carVelocity / delta); // deltaで補正
 
             // 前進・後退
             const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion);
