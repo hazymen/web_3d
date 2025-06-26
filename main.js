@@ -118,7 +118,7 @@ function init() {
     const carFriction = 0.98;
     const carSteerSpeed = 0.06;
     // 車の最大ハンドル切れ度を調整する変数
-    let carMaxSteer = 0.055;
+    let carMaxSteer = 0.062;
 
     let canEnterCar = false;
     const enterCarDistance = 3.0;
@@ -251,6 +251,8 @@ function init() {
     loadCarColliderOBJ('gt86_collider.obj', { x: 4, y: 0, z: -4 });
 
 
+    const cityCollisionMeshes = []; // city2.glb専用の当たり判定用配列
+
     // city.glb専用の読み込み・配置関数
     function loadCityModel(modelName, position) {
         const gltfLoader = new THREE.GLTFLoader();
@@ -259,8 +261,9 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
-                    // 衝突判定用に配列へ追加
-                    collisionMeshes.push(child);
+                    // city2.glbの当たり判定用
+                    cityCollisionMeshes.push(child);
+                    child.frustumCulled = true;
                 }
             });
             gltf.scene.position.set(position.x, position.y, position.z);
@@ -269,7 +272,7 @@ function init() {
         });
     }
 
-    loadCityModel('city.glb', { x: 0, y: 0.01, z: 0 });
+    loadCityModel('city2.glb', { x: 0, y: 0.01, z: 0 });
 
     // 操作切り替え例（F1キーで切り替え）
     document.addEventListener('keydown', (event) => {
@@ -611,33 +614,47 @@ function init() {
             // 回転
             carObject.rotation.y += carSteer * carVelocity;
 
+            // 衝突判定：車の進行方向にレイを飛ばしてcity2.glbと衝突したら速度0
+            const carFront = carObject.position.clone();
+            const carDir = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion).normalize();
+            const carRaycaster = new THREE.Raycaster(
+                carFront,
+                carDir,
+                0,
+                Math.max(1.5, Math.abs(carVelocity) * 2)
+            );
+            const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
+            if (carIntersects.length > 0) {
+                // 前進中のみ速度0にする（バックは止めない）
+                if (carVelocity > 0) carVelocity = 0;
+            }
+
             // 前進・後退
-            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion);
+            const forward = carDir.clone();
             carObject.position.add(forward.multiplyScalar(carVelocity));
 
             // カメラ追従
             const carPos = carObject.position.clone();
-            const carDir = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion);
-            carDir.y = 0;
-            carDir.normalize();
+            const cameraDir = carDir.clone();
+            cameraDir.y = 0;
+            cameraDir.normalize();
 
             if (carViewMode === 1) {
                 // 三人称（後方上空）スムーズ追従
-                const targetOffset = carDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
+                const targetOffset = cameraDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
                 const targetPos = carPos.clone().add(targetOffset);
 
-                // 水平方向(XZ)はゆっくり、Y(高さ)は速めに追従
-                cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * 0.04; // ←値を小さくして遅く
+                cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * 0.04;
                 cameraFollowPos.z += (targetPos.z - cameraFollowPos.z) * 0.04;
-                cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * 0.18; // 高さは速め
+                cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * 0.18;
 
                 camera.position.copy(cameraFollowPos);
                 camera.lookAt(carPos);
             } else if (carViewMode === 2) {
                 // 車内視点（即追従でOK）
-                const cameraOffset = carDir.clone().multiplyScalar(0).add(new THREE.Vector3(0.45, 1.35, 0));
+                const cameraOffset = cameraDir.clone().multiplyScalar(0).add(new THREE.Vector3(0.45, 1.35, 0));
                 camera.position.copy(carPos.clone().add(cameraOffset));
-                camera.lookAt(carPos.clone().add(carDir.clone().multiplyScalar(10)));
+                camera.lookAt(carPos.clone().add(cameraDir.clone().multiplyScalar(10)));
             }
 
             // 速度[m/s] → [km/h]（1単位=1m、1秒間の移動量×3.6）
@@ -669,10 +686,4 @@ function init() {
     let frames = 0;
     let fps = 0;
     animate();
-    //tick();
-
-    function tick() {
-        renderer.render(scene, camera); // レンダリング
-        requestAnimationFrame(tick);
-    }
 }
