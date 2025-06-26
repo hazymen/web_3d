@@ -113,12 +113,16 @@ function init() {
     let carMixer = null;
     let carVelocity = 0;
     let carSteer = 0;
-    const carMaxSpeed = 1;
-    const carAccel = 0.0025;
-    const carFriction = 0.98;
-    const carSteerSpeed = 0.06;
+    // 速度・加速度の単位を「1秒あたりの移動量」に統一し、deltaで補正して加算する
+    // 例: carMaxSpeed = 10; // 10[m/s]（時速36km/h相当）などに設定
+
+    const carMaxSpeed = 200;      // 最高速度[m/s]（例: 10m/s = 36km/h）
+    const carAccel = 10;          // 加速度[m/s^2]
+    const carFriction = 0.98;    // 摩擦（そのままでもOK）
+    const carSteerSpeed = 0.0018;  // ハンドル速度
+
     // 車の最大ハンドル切れ度を調整する変数
-    let carMaxSteer = 0.062;
+    let carMaxSteer = 0.07;
 
     let canEnterCar = false;
     const enterCarDistance = 3.0;
@@ -272,7 +276,7 @@ function init() {
         });
     }
 
-    loadCityModel('city2.glb', { x: 0, y: 0.01, z: 0 });
+    loadCityModel('city.glb', { x: 0, y: 0.01, z: 0 });
 
     // 操作切り替え例（F1キーで切り替え）
     document.addEventListener('keydown', (event) => {
@@ -406,6 +410,8 @@ function init() {
     posDiv.innerText = 'Pos: (0, 0, 0)';
     document.body.appendChild(posDiv);
 
+    // speedDivの生成部分をコメントアウトまたは削除
+    /*
     const speedDiv = document.createElement('div');
     speedDiv.style.position = 'absolute';
     speedDiv.style.right = '10px';
@@ -418,6 +424,7 @@ function init() {
     speedDiv.style.zIndex = '100';
     speedDiv.innerText = '';
     document.body.appendChild(speedDiv);
+    */
 
     const enterCarDiv = document.createElement('div');
     enterCarDiv.style.position = 'absolute';
@@ -559,33 +566,34 @@ function init() {
             if (carForward) {
                 if (carVelocity < -0.01) {
                     // バック中にW→ブレーキ
-                    carVelocity += carAccel * 2;
+                    carVelocity += carAccel * 2 * delta;
                     if (carVelocity > 0) carVelocity = 0;
                 } else if (carStopped && performance.now() - carStopTime < 200) {
                     // 停止直後は加速しない（200ms待つ）
                     // 何もしない
                 } else {
                     // 前進
-                    carVelocity += carAccel;
+                    carVelocity += carAccel * delta;
                 }
             }
             if (carBackward) {
                 if (carVelocity > 0.01) {
                     // 前進中にS→ブレーキ
-                    carVelocity -= carAccel * 2;
+                    carVelocity -= carAccel * 2 * delta;
                     if (carVelocity < 0) carVelocity = 0;
                 } else if (carStopped && performance.now() - carStopTime < 200) {
                     // 停止直後はバック加速しない（200ms待つ）
                     // 何もしない
                 } else {
                     // 停止またはバック
-                    carVelocity -= carAccel * 0.5
+                    carVelocity -= carAccel * 0.5 * delta;
                 }
             }
-            // 速度制限
+            // 速度制限（最高速度は±carMaxSpeed [m/s]）
             carVelocity = Math.max(-carMaxSpeed, Math.min(carMaxSpeed, carVelocity));
-            // 摩擦
-            carVelocity *= carFriction;
+
+            // 摩擦（deltaで補正）
+            carVelocity *= Math.pow(carFriction, delta * 60);
 
             // ステアリングの最大値を速度に応じて変化させる
             // 例: 20km/h未満で最大値、60km/h以上で最小値、その間は線形補間
@@ -631,7 +639,7 @@ function init() {
 
             // 前進・後退
             const forward = carDir.clone();
-            carObject.position.add(forward.multiplyScalar(carVelocity));
+            carObject.position.add(forward.multiplyScalar(carVelocity * delta)); // ← deltaを掛けて「1フレームの移動量」に
 
             // カメラ追従
             const carPos = carObject.position.clone();
@@ -671,7 +679,7 @@ function init() {
             const avgSpeed = window.speedHistory.reduce((a, b) => a + b, 0) / window.speedHistory.length;
             const speedKmh = avgSpeed * 3.6;
 
-            speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
+            // speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
 
             renderer.render(scene, camera);
         }
