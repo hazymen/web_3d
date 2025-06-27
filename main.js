@@ -55,8 +55,8 @@ function init() {
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2); // 色と強さ
     sunLight.position.set(500, 1000, 500); // 太陽の位置（高い位置に設定）
     sunLight.castShadow = true; // 影を有効化
-    sunLight.shadow.mapSize.width = 2048;
-    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.mapSize.width = 1024;
+    sunLight.shadow.mapSize.height = 1024;
     
     // 影の範囲を広げる（ここを追加・調整）
     sunLight.shadow.camera.left = -500;
@@ -85,7 +85,7 @@ function init() {
     // 影を受け付ける
     meshFloor.rotation.x = -Math.PI / 2; // 水平にする
     meshFloor.position.set(0, 0, 0);
-    meshFloor.receiveShadow = true;
+    // meshFloor.receiveShadow = true;
     scene.add(meshFloor);
 
 
@@ -116,8 +116,8 @@ function init() {
     // 速度・加速度の単位を「1秒あたりの移動量」に統一し、deltaで補正して加算する
     // 例: carMaxSpeed = 10; // 10[m/s]（時速36km/h相当）などに設定
 
-    const carMaxSpeed = 200;      // 最高速度[m/s]（例: 10m/s = 36km/h）
-    const carAccel = 16;          // 加速度[m/s^2]
+    const carMaxSpeed = 2000;      // 最高速度[m/s]（例: 10m/s = 36km/h）
+    const carAccel = 22;          // 加速度[m/s^2]
     const carFriction = 0.98;    // 摩擦（そのままでもOK）
     const carSteerSpeed = 0.8;  // ハンドル速度
 
@@ -720,6 +720,75 @@ function init() {
             speedKmh = avgSpeed * 3.6; // m/s → km/h
 
             speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
+
+            // --- 車挙動に慣性・グリップ・サスペンションの簡易実装を追加 ---
+            // animate関数内のisCarMode && carObjectブロック内で下記を適用
+
+            // --- 1. 慣性（ヨー慣性：旋回時の遅れ） ---
+            let targetSteer = steerInput * carSteerSpeed * dynamicSteer;
+            if (!window.carSteerInertia) window.carSteerInertia = 0;
+            const steerInertiaRate = 0.5; // 慣性の強さ（0.1～0.3程度で調整）
+            window.carSteerInertia += (targetSteer - window.carSteerInertia) * steerInertiaRate;
+            carSteer = window.carSteerInertia;
+
+            // --- 2. グリップ（速度に応じて横滑り/ドリフト風） ---
+            // カウンターステアによるドリフトを実装
+
+            if (!window.carSlipAngle) window.carSlipAngle = 0;
+            const gripBase = 0.0; // グリップ基準値（1.0=グリップ強、0.0=ツルツル）
+            const grip = Math.max(0.2, gripBase - Math.abs(carVelocity) * 0.03); // 速度が上がるほどグリップ低下
+
+            // ドリフト時のカウンターステア効果
+            // ステア入力と進行方向が逆の場合（カウンターステア）、横滑り角度を強く戻す
+            let driftAssist = 1.0;
+            if (Math.sign(carSteer) !== Math.sign(window.carSlipAngle) && Math.abs(window.carSlipAngle) > 0.05) {
+                driftAssist = 1.5; // カウンターステア時は横滑り角度の戻りを強く
+            }
+
+            // 横滑り角度の更新
+            window.carSlipAngle += (carSteer * (1 - grip) - window.carSlipAngle) * 0.1 * driftAssist;
+
+            // 車体の進行方向に横滑りを加味して回転
+            carObject.rotation.y += (carSteer * grip + window.carSlipAngle) * delta;
+
+            // --- 3. サスペンション（上下動・ロールの簡易再現） ---
+            if (!window.suspensionOffset) window.suspensionOffset = 0;
+            if (!window.suspensionRoll) window.suspensionRoll = 0;
+            const suspensionStiffness = 0.08; // サスの硬さ
+            const suspensionDamping = 0.7;    // サスの減衰
+            const rollAmount = carSteer * Math.min(Math.abs(carVelocity) / 10, 1.5); // ステア量×速度でロール
+
+            // 上下動（加減速時のピッチ）
+            const pitchTarget = -carVelocity * 0.01;
+            window.suspensionOffset += (pitchTarget - window.suspensionOffset) * suspensionStiffness;
+            window.suspensionOffset *= suspensionDamping;
+
+            // ロール（旋回時の傾き）
+            window.suspensionRoll += (rollAmount - window.suspensionRoll) * suspensionStiffness;
+            window.suspensionRoll *= suspensionDamping;
+
+            // 車体の上下・傾き反映
+            carObject.position.y = 0.5 + window.suspensionOffset; // 0.5は地面からの基準高さ
+            carObject.rotation.z = -window.suspensionRoll * 0.3; // ロール（左右傾き）
+
+            // animate関数内のisCarMode && carObjectブロック内で、前輪の回転を反映
+
+            // 前輪オブジェクトを取得（初回のみキャッシュ）
+            if (!carObject.userData.wheelFR || !carObject.userData.wheelFL) {
+                carObject.traverse(obj => {
+                    if (obj.name === "wheel_FR") carObject.userData.wheelFR = obj;
+                    if (obj.name === "wheel_FL") carObject.userData.wheelFL = obj;
+                });
+            }
+
+            // ステア操作に応じて前輪を回転
+            const steerAngle = carSteer * 1.0; // 1.2は調整用（必要に応じて調整）
+            if (carObject.userData.wheelFR) {
+                carObject.userData.wheelFR.rotation.y = steerAngle;
+            }
+            if (carObject.userData.wheelFL) {
+                carObject.userData.wheelFL.rotation.y = steerAngle;
+            }
 
             renderer.render(scene, camera);
         }
