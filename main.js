@@ -117,9 +117,9 @@ function init() {
     // 例: carMaxSpeed = 10; // 10[m/s]（時速36km/h相当）などに設定
 
     const carMaxSpeed = 200;      // 最高速度[m/s]（例: 10m/s = 36km/h）
-    const carAccel = 10;          // 加速度[m/s^2]
+    const carAccel = 16;          // 加速度[m/s^2]
     const carFriction = 0.98;    // 摩擦（そのままでもOK）
-    const carSteerSpeed = 0.0018;  // ハンドル速度
+    const carSteerSpeed = 0.8;  // ハンドル速度
 
     // 車の最大ハンドル切れ度を調整する変数
     let carMaxSteer = 0.07;
@@ -251,13 +251,45 @@ function init() {
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
     loadGLBModel('71.glb', { x: 3, y: 2, z: 0 });
 
-    loadCarModel('gt86.glb', { x: 4, y: 0, z: -4 });
+    loadCarModel('gt86.glb', { x: 4, y: 0, z: 4 });
     loadCarColliderOBJ('gt86_collider.obj', { x: 4, y: 0, z: -4 });
 
 
-    const cityCollisionMeshes = []; // city2.glb専用の当たり判定用配列
+    const cityCollisionMeshes = []; // city_collider.obj専用の当たり判定用配列
 
-    // city.glb専用の読み込み・配置関数
+    // city_collider.objを読み込み、当たり判定用にする関数
+    function loadCityColliderOBJ(objName, position, scale = {x:1, y:1, z:1}) {
+        const objLoader = new THREE.OBJLoader();
+        objLoader.load(`models/${objName}`, function(object) {
+            object.traverse(function(child) {
+                if (child.isMesh) {
+                    // 透明マテリアル（当たり判定用・非表示）
+                    child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.1, visible: false });
+                    // 衝突判定用に配列へ追加
+                    cityCollisionMeshes.push(child);
+                    // boundingBoxを明示的に計算
+                    if (!child.geometry.boundingBox) {
+                        child.geometry.computeBoundingBox();
+                    }
+                    // ワイヤーフレームを追加して緑色の線で描画
+                    const wireframe = new THREE.LineSegments(
+                        new THREE.WireframeGeometry(child.geometry),
+                        new THREE.LineBasicMaterial({ color: 0x00ff00 })
+                    );
+                    wireframe.position.copy(child.position);
+                    wireframe.rotation.copy(child.rotation);
+                    wireframe.scale.copy(child.scale);
+                    child.add(wireframe);
+                    child.visible = true; // ワイヤーフレームだけ見せる
+                }
+            });
+            object.position.set(position.x, position.y, position.z);
+            object.scale.set(scale.x, scale.y, scale.z);
+            scene.add(object);
+        });
+    }
+
+    // city.glb自体は見た目用として配置
     function loadCityModel(modelName, position) {
         const gltfLoader = new THREE.GLTFLoader();
         gltfLoader.load(`models/${modelName}`, function(gltf) {
@@ -265,8 +297,6 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
-                    // city2.glbの当たり判定用
-                    cityCollisionMeshes.push(child);
                     child.frustumCulled = true;
                 }
             });
@@ -276,7 +306,12 @@ function init() {
         });
     }
 
+    // --- 読み込み呼び出し例 ---
     loadCityModel('city.glb', { x: 0, y: 0.01, z: 0 });
+    loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 });
+
+    // --- 衝突判定は cityCollisionMeshes を使うままでOK ---
+
 
     // 操作切り替え例（F1キーで切り替え）
     document.addEventListener('keydown', (event) => {
@@ -411,7 +446,7 @@ function init() {
     document.body.appendChild(posDiv);
 
     // speedDivの生成部分をコメントアウトまたは削除
-    /*
+    
     const speedDiv = document.createElement('div');
     speedDiv.style.position = 'absolute';
     speedDiv.style.right = '10px';
@@ -424,7 +459,7 @@ function init() {
     speedDiv.style.zIndex = '100';
     speedDiv.innerText = '';
     document.body.appendChild(speedDiv);
-    */
+    
 
     const enterCarDiv = document.createElement('div');
     enterCarDiv.style.position = 'absolute';
@@ -551,6 +586,7 @@ function init() {
             renderer.render(scene, camera);
         }
         if (isCarMode && carObject) {
+            let speedKmh = 0;
             // 車モード
             // 停止状態の判定
             if (Math.abs(carVelocity) < 0.001) {
@@ -579,7 +615,7 @@ function init() {
             if (carBackward) {
                 if (carVelocity > 0.01) {
                     // 前進中にS→ブレーキ
-                    carVelocity -= carAccel * 2 * delta;
+                    carVelocity -= carAccel * 0.5 * delta;
                     if (carVelocity < 0) carVelocity = 0;
                 } else if (carStopped && performance.now() - carStopTime < 200) {
                     // 停止直後はバック加速しない（200ms待つ）
@@ -596,33 +632,35 @@ function init() {
             carVelocity *= Math.pow(carFriction, delta * 60);
 
             // ステアリングの最大値を速度に応じて変化させる
-            // 例: 20km/h未満で最大値、60km/h以上で最小値、その間は線形補間
-            const minSteer = 0.03; // 高速時の最小ハンドル切れ度
-            const maxSteer = 0.8; // 低速時の最大ハンドル切れ度
-            const speedKmhForSteer = Math.abs(carVelocity) / delta * 3.6;
+            // 例: 20km/h未満で最大値、80km/h以上で最小値、その間は線形補間
+            const minSteer = 0.4; // 高速時の最小ハンドル切れ度（例: 0.02rad/frame）
+            const maxSteer = 0.8; // 低速時の最大ハンドル切れ度（例: 0.35rad/frame）
+            speedKmh = Math.abs(carVelocity) * 3.6;
 
             let dynamicSteer = maxSteer;
-            if (speedKmhForSteer > 8) {
-                if (speedKmhForSteer >= 40) {
-                    dynamicSteer = minSteer;
-                } else {
-                    // 20～60km/hの間は線形に変化
-                    dynamicSteer = maxSteer - (maxSteer - minSteer) * ((speedKmhForSteer - 20) / 40);
-                }
+            if (speedKmh <= 15) {
+                // 0～10km/hの間は線形に0へ近づける
+                dynamicSteer = maxSteer * (speedKmh / 15);
+            } else if (speedKmh > 15 && speedKmh < 80) {
+                // 10～80km/hの間は通常の線形補間
+                dynamicSteer = maxSteer - (maxSteer - minSteer) * ((speedKmh - 10) / 70);
+            } else if (speedKmh >= 80) {
+                dynamicSteer = minSteer;
             }
 
-            // ハンドル
-            if (carLeft && !carRight) carSteer = carSteerSpeed;
-            else if (carRight && !carLeft) carSteer = -carSteerSpeed;
-            else carSteer = 0;
+            // --- animate関数内のハンドル・回転処理を修正 ---
 
-            // 最大ハンドル切れ度を速度依存で適用
-            carSteer = Math.max(-dynamicSteer, Math.min(dynamicSteer, carSteer));
+            // ハンドル入力値（-1～1）を計算
+            let steerInput = 0;
+            if (carLeft && !carRight) steerInput = 1;
+            else if (carRight && !carLeft) steerInput = -1;
+
+            // 最大ハンドル切れ度を速度依存で適用（dynamicSteerは既存のまま）
+            carSteer = steerInput * carSteerSpeed * dynamicSteer;
 
             // 回転
-            carObject.rotation.y += carSteer * carVelocity;
-
-            // 衝突判定：車の進行方向にレイを飛ばしてcity2.glbと衝突したら速度0
+            carObject.rotation.y += carSteer * delta; // ← deltaを掛けることで、どのFPSでも同じ角速度
+            // 衝突判定：車の進行方向にレイを飛ばしてcity_collider.objと衝突したら速度0
             const carFront = carObject.position.clone();
             const carDir = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion).normalize();
             const carRaycaster = new THREE.Raycaster(
@@ -632,9 +670,13 @@ function init() {
                 Math.max(1.5, Math.abs(carVelocity) * 2)
             );
             const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
+
+            // ★ヒットしたオブジェクトまでの距離が十分近い場合のみ衝突扱いにする
             if (carIntersects.length > 0) {
-                // 前進中のみ速度0にする（バックは止めない）
-                if (carVelocity > 0) carVelocity = 0;
+                // 例えば0.5m以内に本当に何かがある場合のみ衝突
+                if (carIntersects[0].distance < 0.5) {
+                    if (carVelocity > 0) carVelocity = 0;
+                }
             }
 
             // 前進・後退
@@ -665,21 +707,19 @@ function init() {
                 camera.lookAt(carPos.clone().add(cameraDir.clone().multiplyScalar(10)));
             }
 
-            // 速度[m/s] → [km/h]（1単位=1m、1秒間の移動量×3.6）
-            // carVelocityは1フレームあたりの移動量なので、deltaで積算して平均速度を算出
-            // 直近数フレームの速度を平均化して表示を安定させる
+            // 速度[m/s] → [km/h]の計算部分を修正
 
             // 速度履歴バッファ
             if (!window.speedHistory) window.speedHistory = [];
-            const currentSpeed = Math.abs(carVelocity) / delta; // m/s
+            const currentSpeed = Math.abs(carVelocity); // ← deltaで割らない（carVelocityは[m/s]）
             window.speedHistory.push(currentSpeed);
             if (window.speedHistory.length > 10) window.speedHistory.shift(); // 直近10フレーム分
 
             // 平均速度を計算
             const avgSpeed = window.speedHistory.reduce((a, b) => a + b, 0) / window.speedHistory.length;
-            const speedKmh = avgSpeed * 3.6;
+            speedKmh = avgSpeed * 3.6; // m/s → km/h
 
-            // speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
+            speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
 
             renderer.render(scene, camera);
         }
