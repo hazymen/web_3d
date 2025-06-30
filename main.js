@@ -32,6 +32,12 @@ function init() {
     let rotateLeft = false;
     let rotateRight = false;
 
+    let carForward = false;
+    let carBackward = false;
+    let carLeft = false;
+    let carRight = false;
+
+
     const velocity = 0.1;
     const rotationSpeed = 0.03;
 
@@ -55,8 +61,8 @@ function init() {
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2); // 色と強さ
     sunLight.position.set(500, 1000, 500); // 太陽の位置（高い位置に設定）
     sunLight.castShadow = true; // 影を有効化
-    sunLight.shadow.mapSize.width = 1024;
-    sunLight.shadow.mapSize.height = 1024;
+    sunLight.shadow.mapSize.width = 4096;
+    sunLight.shadow.mapSize.height = 4096;
     
     // 影の範囲を広げる（ここを追加・調整）
     sunLight.shadow.camera.left = -500;
@@ -135,6 +141,8 @@ function init() {
 
     let carStopped = false;
     let carStopTime = 0;
+
+    window.carSlipAngle = 0;
 
 
     // 3Dモデルの読み込み
@@ -727,20 +735,20 @@ function init() {
             // --- 1. 慣性（ヨー慣性：旋回時の遅れ） ---
             let targetSteer = steerInput * carSteerSpeed * dynamicSteer;
             if (!window.carSteerInertia) window.carSteerInertia = 0;
-            const steerInertiaRate = 0.5; // 慣性の強さ（0.1～0.3程度で調整）
+            const steerInertiaRate = 0.15; // 慣性の強さ（0.1～0.3程度で調整）
             window.carSteerInertia += (targetSteer - window.carSteerInertia) * steerInertiaRate;
             carSteer = window.carSteerInertia;
 
             // --- 2. グリップ（速度に応じて横滑り/ドリフト風） ---
             // カウンターステアによるドリフトを実装
 
-            if (!window.carSlipAngle) window.carSlipAngle = 0;
-            const gripBase = 0.0; // グリップ基準値（1.0=グリップ強、0.0=ツルツル）
+            //if (!window.carSlipAngle) window.carSlipAngle = 0;
+            const gripBase = 1.0; // グリップ基準値（1.0=グリップ強、0.0=ツルツル）
             const grip = Math.max(0.2, gripBase - Math.abs(carVelocity) * 0.03); // 速度が上がるほどグリップ低下
 
             // ドリフト時のカウンターステア効果
             // ステア入力と進行方向が逆の場合（カウンターステア）、横滑り角度を強く戻す
-            let driftAssist = 1.0;
+            let driftAssist = 0.5;
             if (Math.sign(carSteer) !== Math.sign(window.carSlipAngle) && Math.abs(window.carSlipAngle) > 0.05) {
                 driftAssist = 1.5; // カウンターステア時は横滑り角度の戻りを強く
             }
@@ -768,7 +776,7 @@ function init() {
             window.suspensionRoll *= suspensionDamping;
 
             // 車体の上下・傾き反映
-            carObject.position.y = 0.5 + window.suspensionOffset; // 0.5は地面からの基準高さ
+            carObject.position.y = window.suspensionOffset; // 0.5は地面からの基準高さ
             carObject.rotation.z = -window.suspensionRoll * 0.3; // ロール（左右傾き）
 
             // animate関数内のisCarMode && carObjectブロック内で、前輪の回転を反映
