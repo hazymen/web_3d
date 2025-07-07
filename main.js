@@ -594,111 +594,127 @@ function init() {
             renderer.render(scene, camera);
         }
         if (isCarMode && carObject) {
-            let speedKmh = 0;
-            // 車モード
-            // 停止状態の判定
-            if (Math.abs(carVelocity) < 0.001) {
-                if (!carStopped) {
-                    carStopped = true;
-                    carStopTime = performance.now();
-                }
-            } else {
-                carStopped = false;
+            // パラメータ
+            const carMass = 1250; // kg
+            const carPower = 200 * 0.7355 * 1000; // 200ps→kW→W
+            const carGripFront = 1.2;
+            const carGripRear = 1.0;
+            const carWheelBase = 2.6; // m
+            const carTireRadius = 0.32; // m
+            const carInertia = 2500;
+
+            // 状態変数
+            if (!window.carState) {
+                window.carState = {
+                    vx: 0, vy: 0, yaw: carObject.rotation.y, yawRate: 0,
+                    throttle: 0, brake: 0, steer: 0, slipAngle: 0
+                };
             }
+            const state = window.carState;
 
-            // ブレーキ・加速・バック処理
-            if (carForward) {
-                if (carVelocity < -0.01) {
-                    // バック中にW→ブレーキ
-                    carVelocity += carAccel * 2 * delta;
-                    if (carVelocity > 0) carVelocity = 0;
-                } else if (carStopped && performance.now() - carStopTime < 200) {
-                    // 停止直後は加速しない（200ms待つ）
-                    // 何もしない
-                } else {
-                    // 前進
-                    carVelocity += carAccel * delta;
-                }
-            }
-            if (carBackward) {
-                if (carVelocity > 0.01) {
-                    // 前進中にS→ブレーキ
-                    carVelocity -= carAccel * 0.5 * delta;
-                    if (carVelocity < 0) carVelocity = 0;
-                } else if (carStopped && performance.now() - carStopTime < 200) {
-                    // 停止直後はバック加速しない（200ms待つ）
-                    // 何もしない
-                } else {
-                    // 停止またはバック
-                    carVelocity -= carAccel * 0.5 * delta;
-                }
-            }
-            // 速度制限（最高速度は±carMaxSpeed [m/s]）
-            carVelocity = Math.max(-carMaxSpeed, Math.min(carMaxSpeed, carVelocity));
-
-            // 摩擦（deltaで補正）
-            carVelocity *= Math.pow(carFriction, delta * 60);
-
-            // ステアリングの最大値を速度に応じて変化させる
-            // 例: 20km/h未満で最大値、80km/h以上で最小値、その間は線形補間
-            const minSteer = 0.4; // 高速時の最小ハンドル切れ度（例: 0.02rad/frame）
-            const maxSteer = 0.8; // 低速時の最大ハンドル切れ度（例: 0.35rad/frame）
-            speedKmh = Math.abs(carVelocity) * 3.6;
-
-            let dynamicSteer = maxSteer;
-            if (speedKmh <= 15) {
-                // 0～10km/hの間は線形に0へ近づける
-                dynamicSteer = maxSteer * (speedKmh / 15);
-            } else if (speedKmh > 15 && speedKmh < 80) {
-                // 10～80km/hの間は通常の線形補間
-                dynamicSteer = maxSteer - (maxSteer - minSteer) * ((speedKmh - 10) / 70);
-            } else if (speedKmh >= 80) {
-                dynamicSteer = minSteer;
-            }
-
-            // --- animate関数内のハンドル・回転処理を修正 ---
-
-            // ハンドル入力値（-1～1）を計算
+            // 入力
+            state.throttle = carForward ? 1 : 0;
+            state.brake = carBackward ? 1 : 0;
             let steerInput = 0;
             if (carLeft && !carRight) steerInput = 1;
             else if (carRight && !carLeft) steerInput = -1;
+            state.steer += (steerInput - state.steer) * 0.2;
 
-            // 最大ハンドル切れ度を速度依存で適用（dynamicSteerは既存のまま）
-            carSteer = steerInput * carSteerSpeed * dynamicSteer;
+            // ステア最大角（速度依存で減少）
+            const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
+            const steerMax = (speed < 10) ? 0.6 : 0.25 + 0.35 * Math.max(0, 1 - (speed - 10) / 50);
+            const steerAngle = state.steer * steerMax;
 
-            // 回転
-            carObject.rotation.y += carSteer * delta; // ← deltaを掛けることで、どのFPSでも同じ角速度
-            // 衝突判定：車の進行方向にレイを飛ばしてcity_collider.objと衝突したら速度0
+            // 駆動力（FR：後輪のみ駆動）
+            const maxForce = carPower / Math.max(speed, 1);
+            let driveForce = state.throttle * maxForce;
+            driveForce = Math.min(driveForce, 6000);
+
+            // ブレーキ力
+            let brakeForce = state.brake * 8000;
+
+            // タイヤ横力
+            const slipAngleFront = Math.atan2(state.vy + carWheelBase * state.yawRate / 2, Math.max(state.vx, 0.1)) - steerAngle;
+            const slipAngleRear = Math.atan2(state.vy - carWheelBase * state.yawRate / 2, Math.max(state.vx, 0.1));
+            const tireForceFront = -carGripFront * slipAngleFront * 8000;
+            const tireForceRear = -carGripRear * slipAngleRear * 8000;
+
+            // 前後タイヤ合成
+            const forceX = driveForce - brakeForce + tireForceRear * Math.sin(steerAngle) + tireForceFront * Math.sin(steerAngle);
+            const forceY = tireForceFront * Math.cos(steerAngle) + tireForceRear * Math.cos(0);
+
+            // 車体速度・ヨー角速度の更新
+            state.vx += (forceX / carMass) * delta;
+            state.vy += (forceY / carMass) * delta;
+            state.vx *= 0.995;
+            state.vy *= 0.995;
+
+            state.yawRate += ((carWheelBase / 2) * (tireForceFront - tireForceRear) / carInertia) * delta;
+            state.yawRate *= 0.98;
+            state.yaw += state.yawRate * delta;
+
+            // --- 進行方向ベクトル修正（Three.js標準：Zマイナスが前方） ---
+            const forward = new THREE.Vector3(0, 0, -1); // Zマイナスが前
+            const right = new THREE.Vector3(1, 0, 0);
+
+            // 車体位置・向きの更新
+            // vx: 前後速度, vy: 横滑り速度
+            const worldForward = forward.clone().applyAxisAngle(new THREE.Vector3(0,1,0), state.yaw);
+            const worldRight = right.clone().applyAxisAngle(new THREE.Vector3(0,1,0), state.yaw);
+
+            carObject.position.add(worldForward.clone().multiplyScalar(state.vx * delta));
+            carObject.position.add(worldRight.clone().multiplyScalar(state.vy * delta));
+            carObject.rotation.y = state.yaw;
+
+            // サスペンション・ロール（ロールはrotation.zで表現、rotation.xは常に0にする）
+            if (!window.suspensionRoll) window.suspensionRoll = 0;
+            // ロール量の係数を小さくし、最大値を制限
+            const rollCoef = 0.12; // ← 0.1～0.2程度で十分
+            const maxRoll = Math.PI / 10;
+            const rollTarget = THREE.MathUtils.clamp(-state.yawRate * rollCoef, -maxRoll, maxRoll);
+            window.suspensionRoll += (rollTarget - window.suspensionRoll) * 0.1;
+            carObject.rotation.x = 0;
+            carObject.rotation.z = window.suspensionRoll;
+
+            // 前輪ステア
+            if (!carObject.userData.wheelFR || !carObject.userData.wheelFL) {
+                carObject.traverse(obj => {
+                    if (obj.name === "wheel_FR") carObject.userData.wheelFR = obj;
+                    if (obj.name === "wheel_FL") carObject.userData.wheelFL = obj;
+                });
+            }
+            if (carObject.userData.wheelFR) {
+                carObject.userData.wheelFR.rotation.y = steerAngle;
+            }
+            if (carObject.userData.wheelFL) {
+                carObject.userData.wheelFL.rotation.y = steerAngle;
+            }
+            // 衝突判定
             const carFront = carObject.position.clone();
-            const carDir = new THREE.Vector3(0, 0, -1).applyQuaternion(carObject.quaternion).normalize();
+            const carDir = worldForward.clone().normalize();
             const carRaycaster = new THREE.Raycaster(
                 carFront,
                 carDir,
                 0,
-                Math.max(1.5, Math.abs(carVelocity) * 2)
+                Math.max(1.5, Math.abs(state.vx) * 2)
             );
             const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
-
-            // ★ヒットしたオブジェクトまでの距離が十分近い場合のみ衝突扱いにする
-            if (carIntersects.length > 0) {
-                // 例えば0.5m以内に本当に何かがある場合のみ衝突
-                if (carIntersects[0].distance < 0.5) {
-                    if (carVelocity > 0) carVelocity = 0;
-                }
+            if (carIntersects.length > 0 && carIntersects[0].distance < 0.5) {
+                state.vx = 0;
+                state.vy = 0;
             }
 
-            // 前進・後退
-            const forward = carDir.clone();
-            carObject.position.add(forward.multiplyScalar(carVelocity * delta)); // ← deltaを掛けて「1フレームの移動量」に
+            const speedKmh = speed * 3.6;
+            speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
 
-            // カメラ追従
+
+            // --- カメラ追従修正 ---
             const carPos = carObject.position.clone();
-            const cameraDir = carDir.clone();
+            const cameraDir = worldForward.clone();
             cameraDir.y = 0;
             cameraDir.normalize();
 
             if (carViewMode === 1) {
-                // 三人称（後方上空）スムーズ追従
                 const targetOffset = cameraDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
                 const targetPos = carPos.clone().add(targetOffset);
 
@@ -709,102 +725,19 @@ function init() {
                 camera.position.copy(cameraFollowPos);
                 camera.lookAt(carPos);
             } else if (carViewMode === 2) {
-                // 車内視点（即追従でOK）
                 const cameraOffset = cameraDir.clone().multiplyScalar(0).add(new THREE.Vector3(0.45, 1.35, 0));
                 camera.position.copy(carPos.clone().add(cameraOffset));
                 camera.lookAt(carPos.clone().add(cameraDir.clone().multiplyScalar(10)));
-            }
-
-            // 速度[m/s] → [km/h]の計算部分を修正
-
-            // 速度履歴バッファ
-            if (!window.speedHistory) window.speedHistory = [];
-            const currentSpeed = Math.abs(carVelocity); // ← deltaで割らない（carVelocityは[m/s]）
-            window.speedHistory.push(currentSpeed);
-            if (window.speedHistory.length > 10) window.speedHistory.shift(); // 直近10フレーム分
-
-            // 平均速度を計算
-            const avgSpeed = window.speedHistory.reduce((a, b) => a + b, 0) / window.speedHistory.length;
-            speedKmh = avgSpeed * 3.6; // m/s → km/h
-
-            speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
-
-            // --- 車挙動に慣性・グリップ・サスペンションの簡易実装を追加 ---
-            // animate関数内のisCarMode && carObjectブロック内で下記を適用
-
-            // --- 1. 慣性（ヨー慣性：旋回時の遅れ） ---
-            let targetSteer = steerInput * carSteerSpeed * dynamicSteer;
-            if (!window.carSteerInertia) window.carSteerInertia = 0;
-            const steerInertiaRate = 0.15; // 慣性の強さ（0.1～0.3程度で調整）
-            window.carSteerInertia += (targetSteer - window.carSteerInertia) * steerInertiaRate;
-            carSteer = window.carSteerInertia;
-
-            // --- 2. グリップ（速度に応じて横滑り/ドリフト風） ---
-            // カウンターステアによるドリフトを実装
-
-            //if (!window.carSlipAngle) window.carSlipAngle = 0;
-            const gripBase = 1.0; // グリップ基準値（1.0=グリップ強、0.0=ツルツル）
-            const grip = Math.max(0.2, gripBase - Math.abs(carVelocity) * 0.03); // 速度が上がるほどグリップ低下
-
-            // ドリフト時のカウンターステア効果
-            // ステア入力と進行方向が逆の場合（カウンターステア）、横滑り角度を強く戻す
-            let driftAssist = 0.5;
-            if (Math.sign(carSteer) !== Math.sign(window.carSlipAngle) && Math.abs(window.carSlipAngle) > 0.05) {
-                driftAssist = 1.5; // カウンターステア時は横滑り角度の戻りを強く
-            }
-
-            // 横滑り角度の更新
-            window.carSlipAngle += (carSteer * (1 - grip) - window.carSlipAngle) * 0.1 * driftAssist;
-
-            // 車体の進行方向に横滑りを加味して回転
-            carObject.rotation.y += (carSteer * grip + window.carSlipAngle) * delta;
-
-            // --- 3. サスペンション（上下動・ロールの簡易再現） ---
-            if (!window.suspensionOffset) window.suspensionOffset = 0;
-            if (!window.suspensionRoll) window.suspensionRoll = 0;
-            const suspensionStiffness = 0.08; // サスの硬さ
-            const suspensionDamping = 0.7;    // サスの減衰
-            const rollAmount = carSteer * Math.min(Math.abs(carVelocity) / 10, 1.5); // ステア量×速度でロール
-
-            // 上下動（加減速時のピッチ）
-            const pitchTarget = -carVelocity * 0.01;
-            window.suspensionOffset += (pitchTarget - window.suspensionOffset) * suspensionStiffness;
-            window.suspensionOffset *= suspensionDamping;
-
-            // ロール（旋回時の傾き）
-            window.suspensionRoll += (rollAmount - window.suspensionRoll) * suspensionStiffness;
-            window.suspensionRoll *= suspensionDamping;
-
-            // 車体の上下・傾き反映
-            carObject.position.y = window.suspensionOffset; // 0.5は地面からの基準高さ
-            carObject.rotation.z = -window.suspensionRoll * 0.3; // ロール（左右傾き）
-
-            // animate関数内のisCarMode && carObjectブロック内で、前輪の回転を反映
-
-            // 前輪オブジェクトを取得（初回のみキャッシュ）
-            if (!carObject.userData.wheelFR || !carObject.userData.wheelFL) {
-                carObject.traverse(obj => {
-                    if (obj.name === "wheel_FR") carObject.userData.wheelFR = obj;
-                    if (obj.name === "wheel_FL") carObject.userData.wheelFL = obj;
-                });
-            }
-
-            // ステア操作に応じて前輪を回転
-            const steerAngle = carSteer * 1.0; // 1.2は調整用（必要に応じて調整）
-            if (carObject.userData.wheelFR) {
-                carObject.userData.wheelFR.rotation.y = steerAngle;
-            }
-            if (carObject.userData.wheelFL) {
-                carObject.userData.wheelFL.rotation.y = steerAngle;
             }
 
             renderer.render(scene, camera);
         }
 
         if (isCarMode && carObject && carColliderObject) {
-            // 車コライダーOBJを車本体と同じ位置・回転に追従させる
-            carColliderObject.position.copy(carObject.position);
-            carColliderObject.quaternion.copy(carObject.quaternion);
+            // 位置・回転を直接代入するのではなく、スムーズに補間して追従させる
+            const lerpAlpha = 0.5; // 0.0～1.0（値を小さくするとより滑らか）
+            carColliderObject.position.lerp(carObject.position, lerpAlpha);
+            carColliderObject.quaternion.slerp(carObject.quaternion, lerpAlpha);
         }
     }
     let lastTime = performance.now();
