@@ -45,6 +45,7 @@ function init() {
     const targetFPS = 60;
     const frameDuration = 1000 / targetFPS; // 1000ms / 60fps = 約16.67ms
     let lastFrameTime = performance.now();
+    let accumulatedTime = 0;
     
     // カメラコントローラーを作成
     /*
@@ -526,12 +527,14 @@ function init() {
 
         const now = performance.now();
         const deltaTime = now - lastFrameTime;
+        lastFrameTime = now;
+        accumulatedTime += deltaTime;
 
-        // フレームレート制限：必要な時間が経過していない場合はスキップ
-        if (deltaTime < frameDuration) {
+        // フレームレート制限：必要な時間が経過するまでスキップ
+        if (accumulatedTime < frameDuration) {
             return;
         }
-        lastFrameTime = now;
+        accumulatedTime -= frameDuration;
 
         frames++;
         if (now - lastTime >= 1000) {
@@ -638,7 +641,8 @@ function init() {
 
             // 入力
             state.throttle = carForward ? 1 : 0;
-            state.brake = carBackward ? 1 : 0;
+            state.brake = 0; // ブレーキは常に0に
+            if (carBackward) state.throttle = -0.2; // バック時は低速で
             let steerInput = 0;
             if (carLeft && !carRight) steerInput = 1;
             else if (carRight && !carLeft) steerInput = -1;
@@ -647,19 +651,23 @@ function init() {
             // ステア最大角（速度依存で減少）
             const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
             const steerMax = (speed < 10) ? 0.6 : 0.25 + 0.35 * Math.max(0, 1 - (speed - 10) / 50);
-            const steerAngle = state.steer * steerMax;
+            let steerAngle = state.steer * steerMax;
+            // バック時はステア操作を逆にする
+            if (state.vx < 0) {
+                steerAngle = -steerAngle;
+            }
 
             // 駆動力（FR：後輪のみ駆動）
-            const maxForce = carPower / Math.max(speed, 1);
+            const maxForce = carPower / Math.max(speed, 0.5); // バック時の速度計算を改善
             let driveForce = state.throttle * maxForce;
-            driveForce = Math.min(driveForce, 6000);
+            driveForce = Math.max(Math.min(driveForce, 6000), -3000); // バック時は-3000まで制限
 
             // ブレーキ力
             let brakeForce = state.brake * 8000;
 
-            // タイヤ横力
-            const slipAngleFront = Math.atan2(state.vy + carWheelBase * state.yawRate / 2, Math.max(state.vx, 0.1)) - steerAngle;
-            const slipAngleRear = Math.atan2(state.vy - carWheelBase * state.yawRate / 2, Math.max(state.vx, 0.1));
+            // タイヤ横力（バック時も正しく計算するため Math.max の代わりに Math.abs を使用）
+            const slipAngleFront = Math.atan2(state.vy + carWheelBase * state.yawRate / 2, Math.max(Math.abs(state.vx), 0.1)) - steerAngle;
+            const slipAngleRear = Math.atan2(state.vy - carWheelBase * state.yawRate / 2, Math.max(Math.abs(state.vx), 0.1));
             const tireForceFront = -carGripFront * slipAngleFront * 8000;
             const tireForceRear = -carGripRear * slipAngleRear * 8000;
 
@@ -713,19 +721,40 @@ function init() {
             if (carObject.userData.wheelFL) {
                 carObject.userData.wheelFL.rotation.y = steerAngle;
             }
-            // 衝突判定
-            const carFront = carObject.position.clone();
+            // 衝突判定（前方）
+            const carFrontPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(1.0)); // 前面から発射
             const carDir = worldForward.clone().normalize();
             const carRaycaster = new THREE.Raycaster(
-                carFront,
+                carFrontPos,
                 carDir,
                 0,
-                Math.max(1.5, Math.abs(state.vx) * 2)
+                Math.max(2.0, Math.abs(state.vx) * 2)
             );
             const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
-            if (carIntersects.length > 0 && carIntersects[0].distance < 0.5) {
+            if (carIntersects.length > 0 && carIntersects[0].distance < 1.0 && state.vx > 0.1) {
                 state.vx = 0;
                 state.vy = 0;
+                state.yawRate = 0; // ヨー角速度もリセット
+                // 衝突時に車を少し押し戻す
+                carObject.position.add(worldForward.clone().multiplyScalar(-0.1));
+            }
+            
+            // 衝突判定（後方）
+            const carBackPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(-1.0)); // 後面から発射
+            const carBackDir = worldForward.clone().multiplyScalar(-1).normalize();
+            const carBackRaycaster = new THREE.Raycaster(
+                carBackPos,
+                carBackDir,
+                0,
+                Math.max(2.0, Math.abs(state.vx) * 2)
+            );
+            const carBackIntersects = carBackRaycaster.intersectObjects(cityCollisionMeshes, true);
+            if (carBackIntersects.length > 0 && carBackIntersects[0].distance < 1.0 && state.vx < -0.1) {
+                state.vx = 0;
+                state.vy = 0;
+                state.yawRate = 0; // ヨー角速度もリセット
+                // 衝突時に車を少し押し戻す
+                carObject.position.add(worldForward.clone().multiplyScalar(0.1));
             }
 
             const speedKmh = speed * 3.6;
