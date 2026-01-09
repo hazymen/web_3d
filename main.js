@@ -1,8 +1,8 @@
 window.addEventListener("DOMContentLoaded", init);
 
 function init() {
-    const width = 960;
-    const height = 540;
+    const width = 1600;
+    const height = 900;
 
     // レンダラーを作成
     const canvasElement = document.querySelector('#myCanvas');
@@ -36,6 +36,10 @@ function init() {
     let carBackward = false;
     let carLeft = false;
     let carRight = false;
+    
+    let overviewMode = false; // Hキーで俯瞰図モード
+    let savedCameraPosition = null;
+    let savedCameraQuaternion = null;
 
 
     const velocity = 0.1;
@@ -380,6 +384,14 @@ function init() {
                 case 'KeyS': moveBackward = true; break;
                 case 'KeyA': rotateLeft = true; break;
                 case 'KeyD': rotateRight = true; break;
+                case 'KeyH':
+                    if (!overviewMode) {
+                        overviewMode = true;
+                        // カメラ位置・向きを保存
+                        savedCameraPosition = camera.position.clone();
+                        savedCameraQuaternion = camera.quaternion.clone();
+                    }
+                    break;
                 case 'Space':
                     if (!isJumping && Math.abs(controls.getObject().position.y - groundHeight) < 0.05) {
                         isJumping = true;
@@ -395,6 +407,13 @@ function init() {
                 case 'KeyS': carBackward = true; break;
                 case 'KeyA': carLeft = true; break;
                 case 'KeyD': carRight = true; break;
+                case 'KeyH':
+                    if (!overviewMode) {
+                        overviewMode = true;
+                        savedCameraPosition = camera.position.clone();
+                        savedCameraQuaternion = camera.quaternion.clone();
+                    }
+                    break;
             }
         }
     });
@@ -405,6 +424,14 @@ function init() {
                 case 'KeyS': moveBackward = false; break;
                 case 'KeyA': rotateLeft = false; break;
                 case 'KeyD': rotateRight = false; break;
+                case 'KeyH':
+                    overviewMode = false;
+                    // カメラ位置・向きを復元
+                    if (savedCameraPosition && savedCameraQuaternion) {
+                        camera.position.copy(savedCameraPosition);
+                        camera.quaternion.copy(savedCameraQuaternion);
+                    }
+                    break;
             }
         }
         if (isCarMode) {
@@ -413,6 +440,13 @@ function init() {
                 case 'KeyS': carBackward = false; break;
                 case 'KeyA': carLeft = false; break;
                 case 'KeyD': carRight = false; break;
+                case 'KeyH':
+                    overviewMode = false;
+                    if (savedCameraPosition && savedCameraQuaternion) {
+                        camera.position.copy(savedCameraPosition);
+                        camera.quaternion.copy(savedCameraQuaternion);
+                    }
+                    break;
             }
         }
     });
@@ -547,10 +581,18 @@ function init() {
         polyDiv.innerText = `Polygons: ${info.render.triangles}`;
 
         let camPos;
-        if (!isCarMode) {
-            camPos = controls.getObject().position;
-        } else if (carViewMode === 1 || carViewMode === 2) {
+        if (overviewMode) {
+            // 町の中心上空から見下ろす視点
+            const lookTarget = new THREE.Vector3(0, 0, 0); // 町の中心（必要に応じて調整）
+            camera.position.set(0, 200, 0);
+            camera.lookAt(lookTarget);
             camPos = camera.position;
+        } else {
+            if (!isCarMode) {
+                camPos = controls.getObject().position;
+            } else if (carViewMode === 1 || carViewMode === 2) {
+                camPos = camera.position;
+            }
         }
         if (camPos) {
             posDiv.innerText = `Pos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})`;
