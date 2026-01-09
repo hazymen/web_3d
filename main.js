@@ -42,7 +42,9 @@ function init() {
     const rotationSpeed = 0.03;
 
     const clock = new THREE.Clock();
-    
+    const targetFPS = 60;
+    const frameDuration = 1000 / targetFPS; // 1000ms / 60fps = 約16.67ms
+    let lastFrameTime = performance.now();
     
     // カメラコントローラーを作成
     /*
@@ -144,6 +146,8 @@ function init() {
 
     window.carSlipAngle = 0;
 
+    let carObjectLoaded = false;
+    let carColliderLoaded = false;
 
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
@@ -218,6 +222,12 @@ function init() {
                     carMixer.clipAction(clip).play();
                 });
             }
+            carObjectLoaded = true;
+            // 両方読み込み済みなら位置を合わせる
+            if (carObjectLoaded && carColliderLoaded && carColliderObject) {
+                carColliderObject.position.copy(carObject.position);
+                carColliderObject.quaternion.copy(carObject.quaternion);
+            }
         });
     }
 
@@ -253,6 +263,12 @@ function init() {
             object.scale.set(scale.x, scale.y, scale.z);
             scene.add(object);
             carColliderObject = object; // コライダーOBJの参照を保存
+            carColliderLoaded = true;
+            // 両方読み込み済みなら位置を合わせる
+            if (carObjectLoaded && carColliderLoaded && carObject) {
+                carColliderObject.position.copy(carObject.position);
+                carColliderObject.quaternion.copy(carObject.quaternion);
+            }
         });
     }
 
@@ -508,8 +524,16 @@ function init() {
     function animate() {
         requestAnimationFrame(animate);
 
-        frames++;
         const now = performance.now();
+        const deltaTime = now - lastFrameTime;
+
+        // フレームレート制限：必要な時間が経過していない場合はスキップ
+        if (deltaTime < frameDuration) {
+            return;
+        }
+        lastFrameTime = now;
+
+        frames++;
         if (now - lastTime >= 1000) {
             fps = frames;
             frames = 0;
