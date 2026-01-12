@@ -895,6 +895,21 @@ function init() {
     posDiv.innerText = 'Pos: (0, 0, 0)';
     document.body.appendChild(posDiv);
 
+    // バージョン情報表示
+    const versionDiv = document.createElement('div');
+    versionDiv.style.position = 'absolute';
+    versionDiv.style.left = '10px';
+    versionDiv.style.top = '82px';
+    versionDiv.style.color = '#aaa';
+    versionDiv.style.background = 'rgba(0,0,0,0.5)';
+    versionDiv.style.padding = '2px 6px';
+    versionDiv.style.fontFamily = 'monospace';
+    versionDiv.style.fontSize = '12px';
+    versionDiv.style.zIndex = '100';
+    const buildDate = new Date().toLocaleString('ja-JP');
+    versionDiv.innerText = `Build: ${buildDate}`;
+    document.body.appendChild(versionDiv);
+
     // speedDivの生成部分をコメントアウトまたは削除
     
     const speedDiv = document.createElement('div');
