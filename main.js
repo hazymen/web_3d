@@ -392,8 +392,8 @@ function init() {
             const colliderMeshes = [];
             object.traverse(function(child) {
                 if (child.isMesh) {
-                    // 透明マテリアル（当たり判定用・非表示）
-                    child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.1, visible: false });
+                    // コライダーメッシュの表示用マテリアル（半透明の緑）
+                    child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.3, visible: true, wireframe: false });
                     // 衝突判定用に配列へ追加
                     collisionMeshes.push(child);
                     colliderMeshes.push(child); // 車固有のメッシュ配列にも追加
@@ -401,17 +401,17 @@ function init() {
                     if (!child.geometry.boundingBox) {
                         child.geometry.computeBoundingBox();
                     }
-                    // ワイヤーフレームを追加（非表示）
+                    // ワイヤーフレームを追加（表示）
                     const wireframe = new THREE.LineSegments(
                         new THREE.WireframeGeometry(child.geometry),
-                        new THREE.LineBasicMaterial({ color: 0x00ff00 })
+                        new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 })
                     );
                     wireframe.position.copy(child.position);
                     wireframe.rotation.copy(child.rotation);
                     wireframe.scale.copy(child.scale);
-                    wireframe.visible = false; // ワイヤーフレームを非表示
+                    wireframe.visible = true; // ワイヤーフレームを表示
                     child.add(wireframe);
-                    child.visible = false; // メッシュも非表示（衝突判定のみ）
+                    child.visible = true; // メッシュを表示（デバッグ用）
                 }
             });
             object.position.set(position.x, position.y, position.z);
@@ -427,15 +427,51 @@ function init() {
         });
     }
 
+    // 車をロード時に地形の高さに基づいて配置する関数
+    function positionCarOnGround(carObject, x, z) {
+        // X, Z座標から下向きにレイキャストして地面を検出
+        const rayOrigin = new THREE.Vector3(x, 10, z); // 上方から下向きに検査
+        const downDir = new THREE.Vector3(0, -1, 0);
+        const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 20.0);
+        
+        let groundY = 0; // デフォルト値
+        if (groundCollisionMeshes.length > 0) {
+            const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
+            if (intersects.length > 0) {
+                groundY = intersects[0].point.y + 0.5; // 車の底から0.5上に配置
+                console.log(`[DEBUG] Car positioned at ground Y=${groundY} (detected=${intersects[0].point.y})`);
+            } else {
+                console.log(`[DEBUG] No ground detected at (${x}, ${z})`);
+            }
+        } else {
+            console.log(`[DEBUG] groundCollisionMeshes is empty!`);
+        }
+        
+        // 車をその地面の上に配置
+        carObject.position.y = groundY;
+    }
+
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
     loadGLBModel('71.glb', { x: 3, y: 2, z: 0 });
 
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
     loadCarColliderOBJ('gt86_collider.obj', 0, { x: -13, y: 0, z: -2 });
+    // 車を地形に配置（少し遅延させて地形メッシュが準備できるのを待つ）
+    setTimeout(() => {
+        if (cars.length > 0 && cars[0].object) {
+            positionCarOnGround(cars[0].object, -13, -2);
+        }
+    }, 500);
 
     loadCarModel('s13.glb', { x: -23, y: 0, z: -2 });
     loadCarColliderOBJ('s13_collider.obj', 1, { x: -23, y: 0, z: -2 });
+    // 車を地形に配置（少し遅延させて地形メッシュが準備できるのを待つ）
+    setTimeout(() => {
+        if (cars.length > 1 && cars[1].object) {
+            positionCarOnGround(cars[1].object, -23, -2);
+        }
+    }, 500);
 
     // 銃モデルを読み込む関数
     function loadGunModel(modelName) {
@@ -472,6 +508,7 @@ function init() {
     loadGunModel('vandal.glb');
 
     const cityCollisionMeshes = []; // city_collider.obj専用の当たり判定用配列
+    const groundCollisionMeshes = []; // city_ground.glb用地面判定配列（坂道対応）
 
     // city_collider.objを読み込み、当たり判定用にする関数
     function loadCityColliderOBJ(objName, position, scale = {x:1, y:1, z:1}) {
@@ -505,7 +542,7 @@ function init() {
         });
     }
 
-    // city.glb自体は見た目用として配置
+    // city.glb自体は見た目用として配置（同時に当たり判定用メッシュも収集）
     function loadCityModel(modelName, position) {
         const gltfLoader = new THREE.GLTFLoader();
         gltfLoader.load(`models/${modelName}`, function(gltf) {
@@ -514,6 +551,8 @@ function init() {
                     child.castShadow = true;
                     child.receiveShadow = true;
                     child.frustumCulled = true;
+                    // 町のモデルのメッシュを当たり判定用に追加
+                    cityCollisionMeshes.push(child);
                 }
             });
             gltf.scene.position.set(position.x, position.y, position.z);
@@ -526,7 +565,31 @@ function init() {
     loadCityModel('city3.glb', { x: 0, y: 0.01, z: 0 });
     loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 });
 
-    // --- 衝突判定は cityCollisionMeshes を使うままでOK ---
+    // 地面モデル（city_ground.glb）を読み込む関数
+    function loadGroundModel(modelName, position) {
+        const gltfLoader = new THREE.GLTFLoader();
+        gltfLoader.load(`models/${modelName}`, function(gltf) {
+            let meshCount = 0;
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    // 地面メッシュを地面判定用に追加
+                    groundCollisionMeshes.push(child);
+                    meshCount++;
+                }
+            });
+            console.log(`[DEBUG] city_ground.glb loaded: ${meshCount} meshes added to groundCollisionMeshes. Total: ${groundCollisionMeshes.length}`);
+            gltf.scene.position.set(position.x, position.y, position.z);
+            gltf.scene.scale.set(1, 1, 1);
+            scene.add(gltf.scene);
+        });
+    }
+
+    // 地面を読み込む
+    loadGroundModel('city_ground.glb', { x: 0, y: 0.01, z: 0 });
+
+    // --- 衝突判定: cityCollisionMeshes は壁用、groundCollisionMeshes は地面用 ---
 
 
     // Fキーで乗車・降車切り替え
@@ -555,12 +618,26 @@ function init() {
             } else if (isCarMode && activeCarIndex >= 0) {
                 // 車モード時、降りる
                 isCarMode = false;
+                rotationDiv.style.display = 'none'; // 回転情報表示を非表示
                 const car = cars[activeCarIndex];
                 if (car && car.object) {
                     const carPos = car.object.position.clone();
                     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(car.object.quaternion).normalize();
                     const exitPos = carPos.clone().add(right.multiplyScalar(2));
-                    controls.getObject().position.set(exitPos.x, groundHeight, exitPos.z);
+                    
+                    // 降車位置の地形高さを検出
+                    let exitHeight = groundHeight; // デフォルト値
+                    if (groundCollisionMeshes.length > 0) {
+                        const rayOrigin = exitPos.clone().add(new THREE.Vector3(0, 2.0, 0));
+                        const downDir = new THREE.Vector3(0, -1, 0);
+                        const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 10.0);
+                        const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
+                        if (intersects.length > 0) {
+                            exitHeight = intersects[0].point.y + 1.6; // 地面 + 視点高さ
+                        }
+                    }
+                    
+                    controls.getObject().position.set(exitPos.x, exitHeight, exitPos.z);
                 }
                 activeCarIndex = -1;
             }
@@ -592,10 +669,45 @@ function init() {
                     }
                     break;
                 case 'Space':
-                    if (!isJumping && Math.abs(controls.getObject().position.y - groundHeight) < 0.05) {
-                        isJumping = true;
-                        velocityY = 0;
-                        jumpFrame = 0;
+                    if (!isJumping) {
+                        // 地形ベースでジャンプ可能か判定
+                        let canJump = false;
+                        
+                        if (groundCollisionMeshes.length > 0) {
+                            // 足元の複数点からレイキャストして確認
+                            const checkPoints = [
+                                new THREE.Vector3(0, 0, 0),      // 中心
+                                new THREE.Vector3(0.2, 0, 0),    // 右
+                                new THREE.Vector3(-0.2, 0, 0),   // 左
+                                new THREE.Vector3(0, 0, 0.2),    // 前
+                                new THREE.Vector3(0, 0, -0.2)    // 後ろ
+                            ];
+                            
+                            for (const offset of checkPoints) {
+                                const rayOrigin = controls.getObject().position.clone().add(offset).add(new THREE.Vector3(0, -0.5, 0));
+                                const downRay = new THREE.Raycaster(rayOrigin, new THREE.Vector3(0, -1, 0), 0, 2.0);
+                                const groundIntersects = downRay.intersectObjects(groundCollisionMeshes, true);
+                                
+                                if (groundIntersects.length > 0) {
+                                    const groundY = groundIntersects[0].point.y;
+                                    const playerY = controls.getObject().position.y;
+                                    // 視点がおよそ地面から1.6上なら着地状態と判定
+                                    if (Math.abs(playerY - (groundY + 1.6)) <= 0.2) {
+                                        canJump = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if (Math.abs(controls.getObject().position.y - groundHeight) < 0.1) {
+                            // 地面メッシュがない場合は従来の判定
+                            canJump = true;
+                        }
+                        
+                        if (canJump) {
+                            isJumping = true;
+                            velocityY = 0;
+                            jumpFrame = 0;
+                        }
                     }
                     break;
             }
@@ -967,6 +1079,22 @@ function init() {
     speedDiv.innerText = '';
     document.body.appendChild(speedDiv);
     
+    // 車両回転情報表示用DIV
+    const rotationDiv = document.createElement('div');
+    rotationDiv.style.position = 'absolute';
+    rotationDiv.style.right = '10px';
+    rotationDiv.style.bottom = '70px';
+    rotationDiv.style.color = '#fff';
+    rotationDiv.style.background = 'rgba(0,0,0,0.5)';
+    rotationDiv.style.padding = '4px 12px';
+    rotationDiv.style.fontFamily = 'monospace';
+    rotationDiv.style.fontSize = '14px';
+    rotationDiv.style.zIndex = '100';
+    rotationDiv.style.display = 'none'; // 乗車時のみ表示
+    rotationDiv.style.whiteSpace = 'pre-line'; // 改行を許可
+    rotationDiv.innerText = '';
+    document.body.appendChild(rotationDiv);
+    
 
     const enterCarDiv = document.createElement('div');
     enterCarDiv.style.position = 'absolute';
@@ -1135,10 +1263,73 @@ function init() {
                 }
                 velocityY += gravity;
                 obj.position.y += velocityY;
-                if (obj.position.y <= groundHeight) {
+                
+                // 地面との距離を検出
+                if (groundCollisionMeshes.length > 0) {
+                    // プレイヤーの足元からレイキャスト
+                    const rayOrigin = obj.position.clone().add(new THREE.Vector3(0, -0.5, 0)); // 足の高さから下へ
+                    const downRay = new THREE.Raycaster(rayOrigin, new THREE.Vector3(0, -1, 0), 0, 5.0);
+                    const groundIntersects = downRay.intersectObjects(groundCollisionMeshes, true);
+                    if (groundIntersects.length > 0) {
+                        const groundY = groundIntersects[0].point.y;
+                        const playerFootY = obj.position.y - 0.5; // プレイヤーの足の位置
+                        // 速度が下向きで、足が地面付近に来たら着地
+                        if (velocityY <= 0 && playerFootY <= groundY + 0.3) {
+                            // プレイヤーを確実に地面に置く（足が地面から0.3上、視点がその1.3上）
+                            obj.position.y = groundY + 1.6; // 視点を地面から1.6上に設定（従来の高さを保持）
+                            isJumping = false;
+                            velocityY = 0;
+                        }
+                    } else {
+                        // 地面が見つからない場合、固定高さで着地
+                        if (obj.position.y <= groundHeight) {
+                            obj.position.y = groundHeight;
+                            isJumping = false;
+                            velocityY = 0;
+                        }
+                    }
+                } else if (obj.position.y <= groundHeight) {
+                    // 地面メッシュがない場合は従来の処理
                     obj.position.y = groundHeight;
                     isJumping = false;
                     velocityY = 0;
+                }
+            } else {
+                // ジャンプ中でない時も地面に合わせるチェック
+                if (groundCollisionMeshes.length > 0) {
+                    // 複数点からレイキャストして最も低い地面を検出
+                    const checkPoints = [
+                        new THREE.Vector3(0, 0, 0),      // 中心
+                        new THREE.Vector3(0.2, 0, 0),    // 右
+                        new THREE.Vector3(-0.2, 0, 0),   // 左
+                        new THREE.Vector3(0, 0, 0.2),    // 前
+                        new THREE.Vector3(0, 0, -0.2)    // 後ろ
+                    ];
+                    
+                    let lowestGround = null;
+                    for (const offset of checkPoints) {
+                        const rayOrigin = obj.position.clone().add(offset).add(new THREE.Vector3(0, -0.5, 0));
+                        const downRay = new THREE.Raycaster(rayOrigin, new THREE.Vector3(0, -1, 0), 0, 3.0);
+                        const groundIntersects = downRay.intersectObjects(groundCollisionMeshes, true);
+                        
+                        if (groundIntersects.length > 0) {
+                            const groundY = groundIntersects[0].point.y;
+                            if (lowestGround === null || groundY < lowestGround) {
+                                lowestGround = groundY;
+                            }
+                        }
+                    }
+                    
+                    if (lowestGround !== null) {
+                        // 最も低い地面に合わせて視点を調整
+                        const targetY = lowestGround + 1.6;
+                        const diff = targetY - obj.position.y;
+                        // 坂の下りに対応するため調整速度を上げる
+                        const adjustSpeed = Math.min(0.3, 0.1 + Math.abs(diff) * 0.1);
+                        if (Math.abs(diff) > 0.01) {
+                            obj.position.y += diff * adjustSpeed;
+                        }
+                    }
                 }
             }
             // 前進・後退・左右移動
@@ -1342,9 +1533,18 @@ function init() {
             if (car.userData.wheelFL) {
                 car.userData.wheelFL.rotation.y = steerAngle;
             }
-            // 衝突判定（前方）
-            const carFrontPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(1.0)); // 前面から発射
+            
+            // 衝突判定（前方）- 坂道対応版
+            // 垂直レイキャスト（地面に沿って移動するため）
+            const carFrontPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(0.5)); // 前方0.5のポイント
+            const carBackPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(-0.5)); // 後方0.5
+            const carRightDir = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), worldForward).normalize();
+            const carRightPos = carObject.position.clone().add(carRightDir.clone().multiplyScalar(0.4)); // 右0.4
+            const carLeftPos = carObject.position.clone().add(carRightDir.clone().multiplyScalar(-0.4)); // 左0.4
+            
             const carDir = worldForward.clone().normalize();
+            
+            // 水平方向のレイキャスト（壁衝突検出）
             const carRaycaster = new THREE.Raycaster(
                 carFrontPos,
                 carDir,
@@ -1352,7 +1552,45 @@ function init() {
                 Math.max(2.0, Math.abs(state.vx) * 2)
             );
             const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
-            if (carIntersects.length > 0 && carIntersects[0].distance < 1.0 && state.vx > 0.1) {
+            
+            // 垂直レイキャスト（地面に沿う高さを検出）
+            // 厚さのない平面に対応するため、複数地点からレイキャストして各地点の高さを取得
+            const downDir = new THREE.Vector3(0, -1, 0); // 完全に下向き
+            const rayCastPoints = [
+                { pos: carObject.position.clone(), name: 'center' },
+                { pos: carFrontPos.clone(), name: 'front' },
+                { pos: carBackPos.clone(), name: 'back' },
+                { pos: carRightPos.clone(), name: 'right' },
+                { pos: carLeftPos.clone(), name: 'left' }
+            ];
+            
+            let maxGroundHeight = carObject.position.y - 5.0; // デフォルト値（地面がない場合）
+            let foundGround = false;
+            const groundHeights = {}; // 各地点の地面高さを保存
+            
+            for (const checkPoint of rayCastPoints) {
+                const carDownRaycaster = new THREE.Raycaster(
+                    checkPoint.pos.clone().add(new THREE.Vector3(0, 2.0, 0)), // 上方2.0から下向きに検査
+                    downDir,
+                    0,
+                    10.0 // 厚さのない平面対応で範囲を大きく
+                );
+                const carDownIntersects = carDownRaycaster.intersectObjects(groundCollisionMeshes, true);
+                
+                if (carDownIntersects.length > 0) {
+                    const groundHeight = carDownIntersects[0].point.y;
+                    groundHeights[checkPoint.name] = groundHeight;
+                    if (groundHeight > maxGroundHeight) {
+                        maxGroundHeight = groundHeight;
+                    }
+                    foundGround = true;
+                } else {
+                    groundHeights[checkPoint.name] = null;
+                }
+            }
+            
+            // 水平衝突判定（壁など）
+            if (carIntersects.length > 0 && carIntersects[0].distance < 0.8 && state.vx > 0.1) {
                 state.vx = 0;
                 state.vy = 0;
                 state.yawRate = 0; // ヨー角速度もリセット
@@ -1360,17 +1598,42 @@ function init() {
                 carObject.position.add(worldForward.clone().multiplyScalar(-0.1));
             }
             
+            // 地面対応（シンプルな方法：車の中心直下の地面を検出）
+            if (foundGround && groundCollisionMeshes.length > 0) {
+                // 車の中心から直下にレイキャストして最も近い地面を検出
+                const rayOrigin = carObject.position.clone().add(new THREE.Vector3(0, 5.0, 0));
+                const downDir = new THREE.Vector3(0, -1, 0);
+                const carHeightRaycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 15.0);
+                const carHeightIntersects = carHeightRaycaster.intersectObjects(groundCollisionMeshes, true);
+                
+                if (carHeightIntersects.length > 0) {
+                    // 最も近い地面が見つかった
+                    const groundY = carHeightIntersects[0].point.y;
+                    const targetHeight = groundY + 0.5; // 車の底から0.5上
+                    
+                    // 高さを即座に設定（フレームごとに確実に地面に配置）
+                    carObject.position.y = targetHeight;
+                    
+                    // デバッグ情報（最初は出力、後は削除）
+                    // console.log(`Car at height: ${targetHeight.toFixed(2)}, ground: ${groundY.toFixed(2)}`);
+                } else {
+                    // console.log(`[DEBUG] No ground intersection found in car physics loop`);
+                }
+            } else if (!foundGround) {
+                // console.log(`[DEBUG] foundGround=false, no ground height adjustment`);
+            }
+            
             // 衝突判定（後方）
-            const carBackPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(-1.0)); // 後面から発射
+            const carBackCheckPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(-1.0)); // 後面から発射
             const carBackDir = worldForward.clone().multiplyScalar(-1).normalize();
             const carBackRaycaster = new THREE.Raycaster(
-                carBackPos,
+                carBackCheckPos,
                 carBackDir,
                 0,
                 Math.max(2.0, Math.abs(state.vx) * 2)
             );
             const carBackIntersects = carBackRaycaster.intersectObjects(cityCollisionMeshes, true);
-            if (carBackIntersects.length > 0 && carBackIntersects[0].distance < 1.0 && state.vx < -0.1) {
+            if (carBackIntersects.length > 0 && carBackIntersects[0].distance < 0.8 && state.vx < -0.1) {
                 state.vx = 0;
                 state.vy = 0;
                 state.yawRate = 0; // ヨー角速度もリセット
@@ -1380,6 +1643,19 @@ function init() {
 
             const speedKmh = speed * 3.6;
             speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
+            
+            // 車両回転情報を表示
+            const euler = new THREE.Euler();
+            euler.setFromQuaternion(carObject.quaternion, 'YXZ');
+            const pitchDeg = THREE.MathUtils.radToDeg(euler.x);
+            const rollDeg = THREE.MathUtils.radToDeg(euler.z);
+            const yawDeg = THREE.MathUtils.radToDeg(euler.y);
+            
+            rotationDiv.style.display = 'block';
+            rotationDiv.innerText = 
+                `Pitch: ${pitchDeg.toFixed(1)}°\n` +
+                `Roll: ${rollDeg.toFixed(1)}°\n` +
+                `Yaw: ${yawDeg.toFixed(1)}°`;
 
             // 乗車中の車のコライダーを即座に同期（走行中の追従性を重視）
             if (car.colliderObject) {
@@ -1540,8 +1816,9 @@ function init() {
     function drawMinimap() {
         // プレイヤー/車の位置を取得
         let playerPos;
-        if (isCarMode && carObject) {
-            playerPos = carObject.position;
+        const activeCar = getActiveCar();
+        if (isCarMode && activeCar && activeCar.object) {
+            playerPos = activeCar.object.position;
         } else {
             playerPos = controls.getObject().position;
         }
@@ -1582,8 +1859,8 @@ function init() {
 
         // 向き矢印
         let direction;
-        if (isCarMode && carObject) {
-            direction = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), carObject.rotation.y);
+        if (isCarMode && activeCar && activeCar.object) {
+            direction = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), activeCar.object.rotation.y);
         } else {
             direction = new THREE.Vector3();
             controls.getDirection(direction);
