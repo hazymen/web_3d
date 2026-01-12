@@ -209,18 +209,16 @@ function init() {
     const shootingRateLimit = 100; // ミリ秒（0.1秒ごとに連射）
     let lastShotTime = 0;
 
-    // ===== オーディオコンテキスト初期化（GitHub Pages等のオートプレイ制限対策） =====
-    let audioContextInitialized = false;
-    function initAudioContext() {
-        if (!audioContextInitialized) {
-            // 一度でいいのでダミー音声を再生することでオーディオコンテキストを有効化
-            const dummyAudio = new Audio();
-            dummyAudio.volume = 0; // 無音
-            dummyAudio.play().catch(() => {
-                // エラーは無視
-            });
-            audioContextInitialized = true;
+    // ===== Web Audio API セットアップ（ブラウザ互換性のための初期化） =====
+    let audioContext = null;
+    function getAudioContext() {
+        if (!audioContext) {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+                audioContext = new AudioContextClass();
+            }
         }
+        return audioContext;
     }
     // =====================
 
@@ -232,14 +230,25 @@ function init() {
     ];
     const stepSoundInterval = 0.4; // 秒（走行時の足音間隔）
     let lastStepTime = 0; // 最後に足音を再生した時刻
-    const stepAudioElements = []; // 読み込み済みaudio要素を保持
+    const stepAudioBuffers = []; // 読み込み済みAudioBuffer配列
 
-    // 足音ファイルを読み込む
-    stepSoundFiles.forEach((file) => {
-        const audio = new Audio(file);
-        audio.volume = 1.0; // ボリュームを30%に設定
-        stepAudioElements.push(audio);
-    });
+    // 足音ファイルを非同期で読み込む
+    async function loadStepSounds() {
+        for (const file of stepSoundFiles) {
+            try {
+                const response = await fetch(file);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioContext = getAudioContext();
+                if (audioContext) {
+                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    stepAudioBuffers.push(audioBuffer);
+                }
+            } catch (error) {
+                console.warn(`Failed to load sound: ${file}`, error);
+            }
+        }
+    }
+    loadStepSounds();
     // ====================
 
     // ===== 銃声SE設定 =====
@@ -248,15 +257,46 @@ function init() {
         'SE/shot2.mp3',
         'SE/shot3.mp3'
     ];
-    const shotAudioElements = []; // 読み込み済みaudio要素を保持
+    const shotAudioBuffers = []; // 読み込み済みAudioBuffer配列
 
-    // 銃声ファイルを読み込む
-    shotSoundFiles.forEach((file) => {
-        const audio = new Audio(file);
-        audio.volume = 0.5; // ボリュームを50%に設定
-        shotAudioElements.push(audio);
-    });
+    // 銃声ファイルを非同期で読み込む
+    async function loadShotSounds() {
+        for (const file of shotSoundFiles) {
+            try {
+                const response = await fetch(file);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioContext = getAudioContext();
+                if (audioContext) {
+                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    shotAudioBuffers.push(audioBuffer);
+                }
+            } catch (error) {
+                console.warn(`Failed to load sound: ${file}`, error);
+            }
+        }
+    }
+    loadShotSounds();
     // ====================
+
+    // 音声再生関数（AudioBuffer用）
+    function playAudio(audioBuffer, volume = 1.0) {
+        const audioContext = getAudioContext();
+        if (!audioContext || !audioBuffer) return;
+
+        try {
+            const source = audioContext.createBufferSource();
+            const gainNode = audioContext.createGain();
+            
+            source.buffer = audioBuffer;
+            gainNode.gain.value = volume;
+            
+            source.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            source.start(0);
+        } catch (error) {
+            console.warn('Error playing audio:', error);
+        }
+    }
 
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
@@ -694,12 +734,10 @@ function init() {
             createMuzzleFlash(muzzlePos, cameraDir);
             
             // 銃声SEをランダムで再生
-            const randomIndex = Math.floor(Math.random() * shotAudioElements.length);
-            const audio = shotAudioElements[randomIndex];
-            audio.currentTime = 0; // 最初から再生
-            audio.play().catch(err => {
-                // オートプレイ制限などで再生失敗した場合もスムーズに続行
-            });
+            if (shotAudioBuffers.length > 0) {
+                const randomIndex = Math.floor(Math.random() * shotAudioBuffers.length);
+                playAudio(shotAudioBuffers[randomIndex], 0.5); // ボリュームは50%
+            }
     }
     
     // 弾道線生成関数
@@ -853,7 +891,11 @@ function init() {
 
     canvasElement.addEventListener('click', () => {
         controls.lock();
-        initAudioContext(); // オーディオコンテキストを初期化
+        // Web Audio APIのオーディオコンテキストを初期化
+        const ctx = getAudioContext();
+        if (ctx && ctx.state === 'suspended') {
+            ctx.resume();
+        }
     });
 
     const fpsDiv = document.createElement('div');
@@ -1117,16 +1159,12 @@ function init() {
             if (rotateLeft) moveVec.x -= 1;
             
             // 足音の再生（走行中かつ地面にいる時のみ）
-            if (moveVec.length() > 0 && !isShooting && !isJumping) {
+            if (moveVec.length() > 0 && !isShooting && !isJumping && stepAudioBuffers.length > 0) {
                 const currentTime = Date.now() / 1000; // 秒単位
                 if (currentTime - lastStepTime >= stepSoundInterval) {
                     // ランダムに足音を選択して再生
-                    const randomIndex = Math.floor(Math.random() * stepAudioElements.length);
-                    const audio = stepAudioElements[randomIndex];
-                    audio.currentTime = 0; // 最初から再生
-                    audio.play().catch(err => {
-                        // オートプレイ制限などで再生失敗した場合もスムーズに続行
-                    });
+                    const randomIndex = Math.floor(Math.random() * stepAudioBuffers.length);
+                    playAudio(stepAudioBuffers[randomIndex], 0.3); // ボリュームは30%
                     lastStepTime = currentTime;
                 }
             }
