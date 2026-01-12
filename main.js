@@ -154,6 +154,28 @@ function init() {
     let carObjectLoaded = false;
     let carColliderLoaded = false;
 
+    // 銃と弾の関連変数
+    let gunObject = null;
+    let gunLoaded = false;
+    const bullets = [];
+    const bulletTrails = [];
+    const impactEffects = []; // 着弾エフェクト用配列
+    const muzzleFlashEffects = []; // マズルフラッシュ用配列
+    const impactEffectObjects = []; // レイキャスト除外用：エフェクトオブジェクト参照配列
+    const bulletSpeed = 0.5;
+    const bulletGravity = 0.003;
+    const bulletTrailDuration = 300; // ミリ秒
+    const gunMuzzleOffset = new THREE.Vector3(0.35, -0.2, -1.5); // 銃口のカメラ座標オフセット
+    
+    // 銃の位置設定
+    const gunPositionNormal = new THREE.Vector3(0.4, -0.3, -0.85); // 通常時の銃のオフセット
+    const gunPositionRunning = new THREE.Vector3(-0.1, -0.35, -0.6); // 走行時の銃のオフセット
+    
+    // 射撃状態フラグ
+    let isShooting = false; // 左クリック長押し中かどうか
+    const shootingRateLimit = 100; // ミリ秒（0.1秒ごとに連射）
+    let lastShotTime = 0;
+
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
     function loadOBJModel(modelName, position) {
@@ -283,6 +305,39 @@ function init() {
     loadCarModel('gt86.glb', { x: 4, y: 0, z: 4 });
     loadCarColliderOBJ('gt86_collider.obj', { x: 4, y: 0, z: -4 });
 
+    // 銃モデルを読み込む関数
+    function loadGunModel(modelName) {
+        const gltfLoader = new THREE.GLTFLoader();
+        gltfLoader.load(`models/${modelName}`, function(gltf) {
+            gunObject = gltf.scene;
+            gunObject.rotation.order = 'YXZ'; // 回転順序を固定
+            
+            // 銃のすべてのメッシュにライティングを適用
+            gunObject.traverse(function(child) {
+                if (child.isMesh) {
+                    // 既存のマテリアルの基本設定を保持して、標準マテリアルに変更
+                    const originalMaterial = child.material;
+                    const baseColor = originalMaterial.color ? originalMaterial.color : new THREE.Color(0x888888);
+                    
+                    child.material = new THREE.MeshStandardMaterial({
+                        color: baseColor,
+                        emissive: new THREE.Color(0x111111), // 自発光を低くして明度を調整
+                        metalness: 0.5,
+                        roughness: 0.5,
+                        side: THREE.FrontSide
+                    });
+                    
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            
+            gunLoaded = true;
+        });
+    }
+    
+    // 銃を読み込み
+    loadGunModel('vandal.glb');
 
     const cityCollisionMeshes = []; // city_collider.obj専用の当たり判定用配列
 
@@ -336,7 +391,7 @@ function init() {
     }
 
     // --- 読み込み呼び出し例 ---
-    loadCityModel('city.glb', { x: 0, y: 0.01, z: 0 });
+    loadCityModel('city3.glb', { x: 0, y: 0.01, z: 0 });
     loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 });
 
     // --- 衝突判定は cityCollisionMeshes を使うままでOK ---
@@ -451,10 +506,226 @@ function init() {
         }
     });
 
+    // 左クリック（長押し対応）
+    document.addEventListener('mousedown', (event) => {
+        if (event.button === 0 && !isCarMode && gunLoaded && gunObject) {
+            isShooting = true;
+            lastShotTime = Date.now(); // 最初の射撃をすぐに行うため時間をセット
+        }
+    });
+    
+    document.addEventListener('mouseup', (event) => {
+        if (event.button === 0) {
+            isShooting = false;
+        }
+    });
+    
+    // 射撃処理を実行する関数
+    function shoot() {
+        if (!gunLoaded || !gunObject) return;
+        
+        const currentTime = Date.now();
+        if (currentTime - lastShotTime < shootingRateLimit) {
+            return; // レート制限
+        }
+        lastShotTime = currentTime;
+            // カメラの向き（画面中央）
+            const cameraDir = new THREE.Vector3();
+            controls.getDirection(cameraDir);
+            
+            // 銃口の位置：カメラ座標に対するオフセットで設定
+            const muzzleOffsetWorld = gunMuzzleOffset.clone().applyQuaternion(camera.quaternion);
+            const muzzlePos = camera.position.clone().add(muzzleOffsetWorld);
+            
+            // レイキャストで着弾判定（銃口から0.5以降の距離で判定、銃自身との衝突を避ける）
+            const raycaster = new THREE.Raycaster(muzzlePos, cameraDir, 0.5, 10000);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            
+            // 町のモデル（city_collider以外）に衝突したかチェック
+            let hitPoint = null;
+            let hitNormal = null;
+            
+            for (let intersection of intersects) {
+                const obj = intersection.object;
+                // 銃や弾自身には衝突しない
+                if (obj === gunObject || obj.parent === gunObject) continue;
+                
+                // エフェクトオブジェクトも除外
+                if (impactEffectObjects.includes(obj)) continue;
+                
+                // city_colliderは除外（透明な当たり判定用）
+                let isCollider = false;
+                let current = obj;
+                while (current) {
+                    if (current.name && current.name.includes('collider')) {
+                        isCollider = true;
+                        break;
+                    }
+                    current = current.parent;
+                }
+                if (isCollider) continue;
+                
+                hitPoint = intersection.point;
+                
+                // 面の法線を取得
+                if (intersection.face) {
+                    hitNormal = intersection.face.normal.clone();
+                    hitNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(intersection.object.matrixWorld));
+                } else {
+                    hitNormal = cameraDir.clone().multiplyScalar(-1);
+                }
+                
+                break;
+            }
+            
+            // 着弾エフェクトを生成
+            if (hitPoint) {
+                // 弾道線を生成
+                createBulletTrail(muzzlePos, hitPoint);
+                
+                createImpactEffect(hitPoint, hitNormal);
+            }
+            
+            // マズルフラッシュエフェクトを銃口に生成
+            createMuzzleFlash(muzzlePos, cameraDir);
+    }
+    
+    // 弾道線生成関数
+    function createBulletTrail(startPos, endPos) {
+        const trailGeometry = new THREE.BufferGeometry();
+        const positions = new Float32Array([
+            startPos.x, startPos.y, startPos.z,
+            endPos.x, endPos.y, endPos.z
+        ]);
+        
+        trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const trailMaterial = new THREE.LineBasicMaterial({
+            color: 0xffffff,
+            linewidth: 3
+        });
+        
+        const trailLine = new THREE.Line(trailGeometry, trailMaterial);
+        scene.add(trailLine);
+        
+        // 弾道線を配列に追加
+        const trail = {
+            line: trailLine,
+            startTime: Date.now(),
+            duration: bulletTrailDuration
+        };
+        
+        bulletTrails.push(trail);
+    }
+    
+    // 着弾エフェクト生成関数
+    function createImpactEffect(position, normal) {
+        const effectDuration = 500; // ミリ秒
+        const particleCount = 12;
+        const particleGeometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        
+        // パーティクルの初期位置（着弾点周辺）
+        for (let i = 0; i < particleCount; i++) {
+            const angle = (i / particleCount) * Math.PI * 2;
+            const distance = 0.1;
+            positions[i * 3] = position.x + Math.cos(angle) * distance;
+            positions[i * 3 + 1] = position.y + Math.sin(angle) * distance;
+            positions[i * 3 + 2] = position.z + (Math.random() - 0.5) * 0.1;
+        }
+        
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const particleMaterial = new THREE.PointsMaterial({
+            color: 0xff8800,
+            size: 0.15,
+            sizeAttenuation: true
+        });
+        
+        const particles = new THREE.Points(particleGeometry, particleMaterial);
+        scene.add(particles);
+        
+        // 爆破エフェクト用の拡大球
+        const explosionGeometry = new THREE.SphereGeometry(0.15, 8, 8);
+        const explosionMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff8800,
+            transparent: true,
+            opacity: 0.8
+        });
+        const explosionMesh = new THREE.Mesh(explosionGeometry, explosionMaterial);
+        explosionMesh.position.copy(position);
+        scene.add(explosionMesh);
+        
+        // エフェクト管理オブジェクト
+        const effect = {
+            particles: particles,
+            explosionMesh: explosionMesh,
+            startTime: Date.now(),
+            duration: effectDuration,
+            initialPositions: new Float32Array(positions)
+        };
+        
+        impactEffects.push(effect);
+        // レイキャスト除外用に参照を追加
+        impactEffectObjects.push(particles);
+        impactEffectObjects.push(explosionMesh);
+    }
+    
+    // マズルフラッシュ生成関数
+    function createMuzzleFlash(position, direction) {
+        const flashDuration = 100; // ミリ秒（短時間）
+        const particleCount = 8;
+        const particleGeometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        
+        // パーティクルの初期位置（銃口から前方に拡散）
+        for (let i = 0; i < particleCount; i++) {
+            const angle = (i / particleCount) * Math.PI * 2;
+            const distance = 0.05;
+            positions[i * 3] = position.x + Math.cos(angle) * distance;
+            positions[i * 3 + 1] = position.y + Math.sin(angle) * distance;
+            positions[i * 3 + 2] = position.z + (Math.random() - 0.5) * 0.05;
+        }
+        
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const particleMaterial = new THREE.PointsMaterial({
+            color: 0xffcc00,
+            size: 0.12,
+            sizeAttenuation: true
+        });
+        
+        const particles = new THREE.Points(particleGeometry, particleMaterial);
+        scene.add(particles);
+        
+        // フラッシュ球（一瞬明るく光る）
+        const flashGeometry = new THREE.SphereGeometry(0.1, 6, 6);
+        const flashMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffff00,
+            transparent: true,
+            opacity: 0.9
+        });
+        const flashMesh = new THREE.Mesh(flashGeometry, flashMaterial);
+        flashMesh.position.copy(position);
+        scene.add(flashMesh);
+        
+        // マズルフラッシュ管理オブジェクト
+        const flash = {
+            particles: particles,
+            flashMesh: flashMesh,
+            startTime: Date.now(),
+            duration: flashDuration,
+            initialPositions: new Float32Array(positions),
+            direction: direction.clone()
+        };
+        
+        muzzleFlashEffects.push(flash);
+        // レイキャスト除外用に参照を追加
+        impactEffectObjects.push(particles);
+        impactEffectObjects.push(flashMesh);
+    }
+
     const controls = new THREE.PointerLockControls(camera, renderer.domElement);
 
     // 移動速度を調整する変数
-    let moveSpeed = 0.04;
+    let moveSpeed = 0.12; // 走り速度に変更
 
     // マウス感度（回転速度）を調整する変数
     let mouseSensitivity = 0.5; // 小さいほどゆっくり、大きいほど速い
@@ -535,6 +806,47 @@ function init() {
     enterCarDiv.style.display = 'none';
     enterCarDiv.innerText = 'Ｆで乗車';
     document.body.appendChild(enterCarDiv);
+
+    // ===== ミニマップの作成 =====
+    const minimapWidth = 250;
+    const minimapHeight = 250;
+    
+    // ミニマップ用キャンバス（表示用）
+    const minimapCanvas = document.createElement('canvas');
+    minimapCanvas.width = minimapWidth;
+    minimapCanvas.height = minimapHeight;
+    minimapCanvas.style.position = 'absolute';
+    minimapCanvas.style.right = '10px';
+    minimapCanvas.style.bottom = '10px';
+    minimapCanvas.style.border = '3px solid #fff';
+    minimapCanvas.style.backgroundColor = 'rgba(0, 20, 40, 0.8)';
+    minimapCanvas.style.zIndex = '100';
+    minimapCanvas.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.8)';
+    document.body.appendChild(minimapCanvas);
+    
+    const minimapCtx = minimapCanvas.getContext('2d');
+    
+    // ミニマップ用のレンダリングターゲット
+    const minimapRenderTarget = new THREE.WebGLRenderTarget(minimapWidth, minimapHeight);
+    
+    // ミニマップ用カメラ（上から見下ろす視点）
+    const minimapCamera = new THREE.OrthographicCamera(
+        -minimapWidth / 2 / 10,
+        minimapWidth / 2 / 10,
+        minimapHeight / 2 / 10,
+        -minimapHeight / 2 / 10,
+        0.1,
+        2000
+    );
+    minimapCamera.position.set(0, 100, 0);
+    minimapCamera.lookAt(0, 0, 0);
+    
+    // ミニマップ用の照明を追加
+    const minimapLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    minimapLight.position.set(100, 200, 100);
+    const minimapLightTarget = new THREE.Object3D();
+    minimapLightTarget.position.set(0, 0, 0);
+    minimapLight.target = minimapLightTarget;
 
     function canMove(newPosition) {
         // 8方向にレイを飛ばしてカメラの半径分の衝突を調べる
@@ -621,6 +933,12 @@ function init() {
         if (!isCarMode) {
             // 歩行者モード（既存の処理）
             let obj = controls.getObject();
+            
+            // 長押し中の連射処理
+            if (isShooting && !isCarMode) {
+                shoot();
+            }
+            
             if (isJumping) {
                 if (jumpFrame < jumpDuration) {
                     velocityY += jumpAccel;
@@ -655,12 +973,71 @@ function init() {
                 moveVec.applyQuaternion(camera.quaternion);
                 moveVec.y = 0;
                 moveVec.normalize();
-                const nextPos = currentPos.clone().add(moveVec.clone().multiplyScalar(moveSpeed));
+                // 射撃中は移動速度を3分の1に制限
+                const currentMoveSpeed = isShooting ? moveSpeed / 3 : moveSpeed;
+                const nextPos = currentPos.clone().add(moveVec.clone().multiplyScalar(currentMoveSpeed));
                 if (canMove(nextPos)) {
                     controls.getObject().position.copy(nextPos);
                 }
             }
+
+            // 銃の配置（走り動作を含む）
+            if (gunLoaded && gunObject) {
+                // 銃がシーンにまだ追加されていなければ追加
+                if (gunObject.parent === null) {
+                    scene.add(gunObject);
+                }
+                
+                // カメラの位置を基準に銃を配置
+                const cameraPos = camera.position.clone();
+                
+                // 移動中かどうかを判定（射撃中は走り動作をしない）
+                const isMoving = moveVec.length() > 0 && !isShooting;
+                
+                // 基本的な銃のオフセット（停止時と走行時で異なる）
+                let gunOffset = isMoving ? gunPositionRunning.clone() : gunPositionNormal.clone();
+                
+                // 走り動作：移動中は銃を左右に振る
+                if (isMoving) {
+                    // 時間ベースで左右に揺れるアニメーション
+                    const time = Date.now() * 0.006; // スピード調整
+                    const bobAmount = Math.sin(time) * 0.15; // 左右の振幅
+                    const verticalBob = Math.abs(Math.sin(time * 0.5)) * 0.08; // 上下の揺れ（歩行感を出す）
+                    
+                    gunOffset.x += bobAmount; // 左右に振る
+                    gunOffset.y += verticalBob; // 上下に揺れる
+                    gunOffset.z -= 0.1; // 走り時はやや前に
+                }
+                
+                gunOffset.applyQuaternion(camera.quaternion);
+                gunObject.position.copy(cameraPos.clone().add(gunOffset));
+                
+                // 銃をカメラの向きに合わせ、走り時は横向きにする
+                gunObject.quaternion.copy(camera.quaternion);
+                
+                if (isMoving) {
+                    // 走り時に銃を横向きに（両手で持つ感じ）
+                    const time = Date.now() * 0.006;
+                    
+                    // Y軸（上下方向）に90度回転させて横向きに
+                    gunObject.rotateY(Math.PI / 2.5);
+                    
+                    // 銃を左右に揺れさせる
+                    const bobAmount = Math.sin(time) * 0.2; // 左右の揺れを強調
+                    gunObject.rotateZ(bobAmount);
+                    
+                    // 上下の小さな揺れ
+                    const verticalBob = Math.sin(time * 0.5) * 0.1;
+                    gunObject.rotateX(verticalBob);
+                }
+                
+                gunObject.visible = true;
+            }
+
             renderer.render(scene, camera);
+        } else if (isCarMode && gunLoaded && gunObject) {
+            // 車モード時は銃を非表示
+            gunObject.visible = false;
         }
         if (isCarMode && carObject) {
             // パラメータ
@@ -827,7 +1204,120 @@ function init() {
 
             renderer.render(scene, camera);
         }
+        
+        // マズルフラッシュの更新処理
+        for (let i = muzzleFlashEffects.length - 1; i >= 0; i--) {
+            const flash = muzzleFlashEffects[i];
+            const elapsed = Date.now() - flash.startTime;
+            const progress = elapsed / flash.duration; // 0～1
+            
+            if (progress >= 1) {
+                // マズルフラッシュ終了
+                scene.remove(flash.particles);
+                scene.remove(flash.flashMesh);
+                // 追跡配列からも削除
+                const particlesIdx = impactEffectObjects.indexOf(flash.particles);
+                if (particlesIdx > -1) impactEffectObjects.splice(particlesIdx, 1);
+                const meshIdx = impactEffectObjects.indexOf(flash.flashMesh);
+                if (meshIdx > -1) impactEffectObjects.splice(meshIdx, 1);
+                muzzleFlashEffects.splice(i, 1);
+                continue;
+            }
+            
+            // パーティクルの前方拡散
+            const positionArray = flash.particles.geometry.attributes.position.array;
+            const particleCount = positionArray.length / 3;
+            const expandDistance = progress * 0.2;
+            
+            for (let j = 0; j < particleCount; j++) {
+                const initialX = flash.initialPositions[j * 3];
+                const initialY = flash.initialPositions[j * 3 + 1];
+                const initialZ = flash.initialPositions[j * 3 + 2];
+                
+                const particlePos = new THREE.Vector3(initialX, initialY, initialZ);
+                const center = flash.particles.position;
+                const direction = particlePos.clone().sub(center).normalize();
+                const bulletDir = flash.direction.clone();
+                
+                // 拡散方向：銃の向き + 外側への拡散
+                const mixedDir = direction.clone().add(bulletDir.multiplyScalar(0.5)).normalize();
+                
+                positionArray[j * 3] = initialX + mixedDir.x * expandDistance;
+                positionArray[j * 3 + 1] = initialY + mixedDir.y * expandDistance;
+                positionArray[j * 3 + 2] = initialZ + mixedDir.z * expandDistance;
+            }
+            flash.particles.geometry.attributes.position.needsUpdate = true;
+            
+            // フラッシュのフェードアウトと縮小
+            flash.flashMesh.material.opacity = 0.9 * (1 - progress);
+            flash.flashMesh.scale.set(1 + progress * 0.5, 1 + progress * 0.5, 1 + progress * 0.5);
+        }
+        
+        // 弾道線の更新処理
+        for (let i = bulletTrails.length - 1; i >= 0; i--) {
+            const trail = bulletTrails[i];
+            const elapsed = Date.now() - trail.startTime;
+            const progress = elapsed / trail.duration; // 0～1
+            
+            if (progress >= 1) {
+                // 弾道線を削除
+                scene.remove(trail.line);
+                bulletTrails.splice(i, 1);
+                continue;
+            }
+            
+            // 弾道線のフェードアウト
+            trail.line.material.opacity = 1 - progress;
+            trail.line.material.transparent = true;
+        }
+        
+        // 着弾エフェクトの更新処理
+        for (let i = impactEffects.length - 1; i >= 0; i--) {
+            const effect = impactEffects[i];
+            const elapsed = Date.now() - effect.startTime;
+            const progress = elapsed / effect.duration; // 0～1
+            
+            if (progress >= 1) {
+                // エフェクト終了
+                scene.remove(effect.particles);
+                scene.remove(effect.explosionMesh);
+                // 追跡配列からも削除
+                const particlesIdx = impactEffectObjects.indexOf(effect.particles);
+                if (particlesIdx > -1) impactEffectObjects.splice(particlesIdx, 1);
+                const meshIdx = impactEffectObjects.indexOf(effect.explosionMesh);
+                if (meshIdx > -1) impactEffectObjects.splice(meshIdx, 1);
+                impactEffects.splice(i, 1);
+                continue;
+            }
+            
+            // パーティクルの拡散アニメーション
+            const positionArray = effect.particles.geometry.attributes.position.array;
+            const particleCount = positionArray.length / 3;
+            const expandDistance = progress * 0.3;
+            
+            for (let j = 0; j < particleCount; j++) {
+                const initialX = effect.initialPositions[j * 3];
+                const initialY = effect.initialPositions[j * 3 + 1];
+                const initialZ = effect.initialPositions[j * 3 + 2];
+                
+                // 初期位置から中心へのベクトル
+                const particlePos = new THREE.Vector3(initialX, initialY, initialZ);
+                const center = effect.particles.position;
+                const direction = particlePos.clone().sub(center).normalize();
+                
+                positionArray[j * 3] = initialX + direction.x * expandDistance;
+                positionArray[j * 3 + 1] = initialY + direction.y * expandDistance;
+                positionArray[j * 3 + 2] = initialZ + direction.z * expandDistance;
+            }
+            effect.particles.geometry.attributes.position.needsUpdate = true;
+            
+            // 爆破メッシュのフェードアウト
+            effect.explosionMesh.material.opacity = 0.8 * (1 - progress);
+            effect.explosionMesh.scale.set(1 + progress, 1 + progress, 1 + progress);
+        }
 
+        // ミニマップを描画
+        drawMinimap();
         if (isCarMode && carObject && carColliderObject) {
             // 位置・回転を直接代入するのではなく、スムーズに補間して追従させる
             const lerpAlpha = 0.5; // 0.0～1.0（値を小さくするとより滑らか）
@@ -835,6 +1325,72 @@ function init() {
             carColliderObject.quaternion.slerp(carObject.quaternion, lerpAlpha);
         }
     }
+    // ミニマップ描画関数
+    function drawMinimap() {
+        // プレイヤー/車の位置を取得
+        let playerPos;
+        if (isCarMode && carObject) {
+            playerPos = carObject.position;
+        } else {
+            playerPos = controls.getObject().position;
+        }
+
+        // ミニマップカメラの位置をプレイヤーの上に配置
+        minimapCamera.position.x = playerPos.x;
+        minimapCamera.position.z = playerPos.z;
+        minimapCamera.lookAt(playerPos.x, 0, playerPos.z);
+
+        // ミニマップをレンダリングターゲットに描画
+        renderer.setRenderTarget(minimapRenderTarget);
+        renderer.render(scene, minimapCamera);
+        renderer.setRenderTarget(null);
+
+        // レンダリングターゲットをキャンバスに描画
+        const pixelData = new Uint8Array(minimapWidth * minimapHeight * 4);
+        renderer.readRenderTargetPixels(minimapRenderTarget, 0, 0, minimapWidth, minimapHeight, pixelData);
+
+        const imageData = minimapCtx.createImageData(minimapWidth, minimapHeight);
+        // WebGLはY軸が反転しているため補正
+        for (let i = 0; i < minimapHeight; i++) {
+            const srcOffset = i * minimapWidth * 4;
+            const dstOffset = (minimapHeight - 1 - i) * minimapWidth * 4;
+            imageData.data.set(pixelData.subarray(srcOffset, srcOffset + minimapWidth * 4), dstOffset);
+        }
+
+        minimapCtx.putImageData(imageData, 0, 0);
+
+        // プレイヤーマーカーを描画
+        const centerX = minimapWidth / 2;
+        const centerY = minimapHeight / 2;
+
+        // プレイヤーの位置マーカー
+        minimapCtx.fillStyle = isCarMode ? 'rgba(0, 255, 0, 0.7)' : 'rgba(0, 170, 255, 0.7)';
+        minimapCtx.beginPath();
+        minimapCtx.arc(centerX, centerY, 5, 0, Math.PI * 2);
+        minimapCtx.fill();
+
+        // 向き矢印
+        let direction;
+        if (isCarMode && carObject) {
+            direction = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), carObject.rotation.y);
+        } else {
+            direction = new THREE.Vector3();
+            controls.getDirection(direction);
+        }
+
+        minimapCtx.strokeStyle = isCarMode ? 'rgba(0, 255, 0, 0.9)' : 'rgba(0, 170, 255, 0.9)';
+        minimapCtx.lineWidth = 2;
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(centerX, centerY);
+        minimapCtx.lineTo(centerX + direction.x * 15, centerY + direction.z * 15);
+        minimapCtx.stroke();
+
+        // 外枠
+        minimapCtx.strokeStyle = '#fff';
+        minimapCtx.lineWidth = 2;
+        minimapCtx.strokeRect(0, 0, minimapWidth, minimapHeight);
+    }
+
     let lastTime = performance.now();
     let frames = 0;
     let fps = 0;
