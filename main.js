@@ -224,9 +224,9 @@ function init() {
 
     // ===== 足音SE設定 =====
     const stepSoundFiles = [
-        'SE/step1.mp3',
-        'SE/step2.mp3',
-        'SE/step3.mp3'
+        'se/step1.mp3',
+        'se/step2.mp3',
+        'se/step3.mp3'
     ];
     const stepSoundInterval = 0.4; // 秒（走行時の足音間隔）
     let lastStepTime = 0; // 最後に足音を再生した時刻
@@ -253,9 +253,9 @@ function init() {
 
     // ===== 銃声SE設定 =====
     const shotSoundFiles = [
-        'SE/shot1.mp3',
-        'SE/shot2.mp3',
-        'SE/shot3.mp3'
+        'se/shot1.mp3',
+        'se/shot2.mp3',
+        'se/shot3.mp3'
     ];
     const shotAudioBuffers = []; // 読み込み済みAudioBuffer配列
 
