@@ -411,7 +411,7 @@ function init() {
                     wireframe.scale.copy(child.scale);
                     wireframe.visible = true; // ワイヤーフレームを表示
                     child.add(wireframe);
-                    child.visible = true; // メッシュを表示（デバッグ用）
+                    child.visible = false; // メッシュを表示（デバッグ用）
                 }
             });
             object.position.set(position.x, position.y, position.z);
