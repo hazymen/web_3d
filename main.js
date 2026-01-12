@@ -19,7 +19,7 @@ function init() {
 
     // カメラを作成
     const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-    camera.position.set(0, 1.6, 5); // 一人称視点の高さ
+    camera.position.set(-10, 1.6, -25); // 一人称視点の高さ
 
     function setFov(fov) {
         camera.fov = fov;
@@ -118,41 +118,74 @@ function init() {
     let jumpFrame = 0;
     const groundHeight = 1.6;
 
-    // 操作モード切替用フラグ
+    // ===== プレイヤースポーン設定 =====
+    const spawnPosition = new THREE.Vector3(-10, 1.6, -25); // スポーン位置
+    const spawnRotation = {
+        pitch: 0,      // 上下の角度（ラジアン）：負=上向き、正=下向き
+        yaw: Math.PI-0.6         // 左右の角度（ラジアン）：0=Z-方向（前）、Math.PI/2=X+方向（右）
+    };
+    // =====================================
+
+    // ===== 複数車両管理システム =====
+    // 車データ構造（複数台の車を同時に管理）
+    let cars = []; // 全車両を保存する配列
+    let activeCarIndex = -1; // 現在乗車している車のインデックス（-1 = 乗車なし）
+    
+    // Car オブジェクトの構造
+    // {
+    //   object: GLTFシーン,
+    //   mixer: アニメーションミキサー,
+    //   colliderObject: 当たり判定OBJオブジェクト,
+    //   colliderMeshes: コライダーのメッシュ配列,
+    //   loaded: 読み込み完了フラグ,
+    //   colliderLoaded: コライダー読み込み完了フラグ,
+    //   state: 車の物理状態,
+    //   userData: ホイール参照など
+    // }
+
+    // 操作モード（乗車状態）フラグ
     let isCarMode = false;
 
-    // gt86.glb専用の読み込み・配置・操作用変数
-    let carObject = null;
-    let carMixer = null;
-    let carVelocity = 0;
-    let carSteer = 0;
-    // 速度・加速度の単位を「1秒あたりの移動量」に統一し、deltaで補正して加算する
-    // 例: carMaxSpeed = 10; // 10[m/s]（時速36km/h相当）などに設定
+    // 現在乗車中の車への便利なアクセス
+    function getActiveCar() {
+        if (activeCarIndex >= 0 && activeCarIndex < cars.length) {
+            return cars[activeCarIndex];
+        }
+        return null;
+    }
 
-    const carMaxSpeed = 2000;      // 最高速度[m/s]（例: 10m/s = 36km/h）
+    // ===== 車の物理定数（全車両共通） =====
+    // 複数の車モデルを実装する際の標準構造
+    // 注: すべての可動部品を含むわけではない。モデルに存在する部品のみ実装する。
+    // frame
+    //   ├─ エンジンやインテリア、その他部品（不可動部品）
+    //   └─ body
+    //       ├─ door_L（存在する場合）
+    //       ├─ door_R（存在する場合）
+    //       ├─ hood（存在する場合）
+    //       ├─ trunk（存在する場合）
+    //       └─ そのほか部品（不可動部品）
+    // wheel_FL
+    // wheel_FR
+    // wheel_RL
+    // wheel_RR
+    // ===================================
+
+    // 車の物理定数（全車両共通）
+    const carMaxSpeed = 2000;      // 最高速度[m/s]
     const carAccel = 22;          // 加速度[m/s^2]
-    const carFriction = 0.98;    // 摩擦（そのままでもOK）
+    const carFriction = 0.98;    // 摩擦係数
     const carSteerSpeed = 0.8;  // ハンドル速度
+    const carMaxSteer = 0.07;   // 最大ハンドル角
 
-    // 車の最大ハンドル切れ度を調整する変数
-    let carMaxSteer = 0.07;
-
-    let canEnterCar = false;
-    const enterCarDistance = 3.0;
-    // 車視点切り替え用フラグ
-    let carViewMode = 1; // 1:三人称(デフォルト), 2:車内視点
-
-
-    // カメラ追従用のスムーズな追従位置（初期値は車の位置）
-    let cameraFollowPos = new THREE.Vector3(0, 3, -6);
-
+    const enterCarDistance = 3.0;  // 乗車可能距離
+    let canEnterCar = false;       // 乗車可能フラグ
+    let nearestCarIndex = -1;      // 最も近い車のインデックス
+    let carViewMode = 1;           // 1:三人称, 2:車内視点
+    let cameraFollowPos = new THREE.Vector3(0, 3, -6); // カメラ追従位置
     let carStopped = false;
     let carStopTime = 0;
-
     window.carSlipAngle = 0;
-
-    let carObjectLoaded = false;
-    let carColliderLoaded = false;
 
     // 銃と弾の関連変数
     let gunObject = null;
@@ -175,6 +208,40 @@ function init() {
     let isShooting = false; // 左クリック長押し中かどうか
     const shootingRateLimit = 100; // ミリ秒（0.1秒ごとに連射）
     let lastShotTime = 0;
+
+    // ===== 足音SE設定 =====
+    const stepSoundFiles = [
+        'SE/step1.mp3',
+        'SE/step2.mp3',
+        'SE/step3.mp3'
+    ];
+    const stepSoundInterval = 0.4; // 秒（走行時の足音間隔）
+    let lastStepTime = 0; // 最後に足音を再生した時刻
+    const stepAudioElements = []; // 読み込み済みaudio要素を保持
+
+    // 足音ファイルを読み込む
+    stepSoundFiles.forEach((file) => {
+        const audio = new Audio(file);
+        audio.volume = 1.0; // ボリュームを30%に設定
+        stepAudioElements.push(audio);
+    });
+    // ====================
+
+    // ===== 銃声SE設定 =====
+    const shotSoundFiles = [
+        'SE/shot1.mp3',
+        'SE/shot2.mp3',
+        'SE/shot3.mp3'
+    ];
+    const shotAudioElements = []; // 読み込み済みaudio要素を保持
+
+    // 銃声ファイルを読み込む
+    shotSoundFiles.forEach((file) => {
+        const audio = new Audio(file);
+        audio.volume = 0.5; // ボリュームを50%に設定
+        shotAudioElements.push(audio);
+    });
+    // ====================
 
     // 3Dモデルの読み込み
     const objLoader = new THREE.OBJLoader();
@@ -232,49 +299,54 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
-                    
                 }
             });
-            console.log('collisionMeshes after loading car:', collisionMeshes);
 
             gltf.scene.position.set(position.x, position.y, position.z);
             gltf.scene.scale.set(1, 1, 1);
             scene.add(gltf.scene);
-            carObject = gltf.scene;
+
+            // 新しい車オブジェクトを作成
+            const carData = {
+                object: gltf.scene,
+                mixer: null,
+                colliderObject: null,
+                colliderMeshes: [],
+                loaded: true,
+                colliderLoaded: false,
+                state: null,
+                userData: {}
+            };
 
             // アニメーションがあれば再生
             if (gltf.animations && gltf.animations.length > 0) {
-                carMixer = new THREE.AnimationMixer(gltf.scene);
+                carData.mixer = new THREE.AnimationMixer(gltf.scene);
                 gltf.animations.forEach((clip) => {
-                    carMixer.clipAction(clip).play();
+                    carData.mixer.clipAction(clip).play();
                 });
             }
-            carObjectLoaded = true;
-            // 両方読み込み済みなら位置を合わせる
-            if (carObjectLoaded && carColliderLoaded && carColliderObject) {
-                carColliderObject.position.copy(carObject.position);
-                carColliderObject.quaternion.copy(carObject.quaternion);
-            }
+
+            cars.push(carData);
         });
     }
 
-    let carColliderObject = null; // 車コライダーOBJの参照を保持
-
-    // 車の当たり判定用OBJモデルを読み込み、透明＋ワイヤーフレーム表示する関数
-    function loadCarColliderOBJ(objName, position, scale = {x:1, y:1, z:1}) {
+    // 車の当たり判定用OBJモデルを読み込む関数
+    function loadCarColliderOBJ(objName, carIndex, position, scale = {x:1, y:1, z:1}) {
         const objLoader = new THREE.OBJLoader();
         objLoader.load(`models/${objName}`, function(object) {
+            const colliderMeshes = [];
             object.traverse(function(child) {
                 if (child.isMesh) {
                     // 透明マテリアル（当たり判定用・非表示）
                     child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.1, visible: false });
                     // 衝突判定用に配列へ追加
                     collisionMeshes.push(child);
+                    colliderMeshes.push(child); // 車固有のメッシュ配列にも追加
                     // boundingBoxを明示的に計算
                     if (!child.geometry.boundingBox) {
                         child.geometry.computeBoundingBox();
                     }
-                    // ワイヤーフレームを追加
+                    // ワイヤーフレームを追加（非表示）
                     const wireframe = new THREE.LineSegments(
                         new THREE.WireframeGeometry(child.geometry),
                         new THREE.LineBasicMaterial({ color: 0x00ff00 })
@@ -282,19 +354,20 @@ function init() {
                     wireframe.position.copy(child.position);
                     wireframe.rotation.copy(child.rotation);
                     wireframe.scale.copy(child.scale);
+                    wireframe.visible = false; // ワイヤーフレームを非表示
                     child.add(wireframe);
-                    child.visible = true; // ワイヤーフレームだけ見せる
+                    child.visible = false; // メッシュも非表示（衝突判定のみ）
                 }
             });
             object.position.set(position.x, position.y, position.z);
             object.scale.set(scale.x, scale.y, scale.z);
             scene.add(object);
-            carColliderObject = object; // コライダーOBJの参照を保存
-            carColliderLoaded = true;
-            // 両方読み込み済みなら位置を合わせる
-            if (carObjectLoaded && carColliderLoaded && carObject) {
-                carColliderObject.position.copy(carObject.position);
-                carColliderObject.quaternion.copy(carObject.quaternion);
+
+            // 対応する車データを更新
+            if (carIndex >= 0 && carIndex < cars.length) {
+                cars[carIndex].colliderObject = object;
+                cars[carIndex].colliderMeshes = colliderMeshes;
+                cars[carIndex].colliderLoaded = true;
             }
         });
     }
@@ -302,8 +375,12 @@ function init() {
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
     loadGLBModel('71.glb', { x: 3, y: 2, z: 0 });
 
-    loadCarModel('gt86.glb', { x: 4, y: 0, z: 4 });
-    loadCarColliderOBJ('gt86_collider.obj', { x: 4, y: 0, z: -4 });
+    // 複数の車を読み込む
+    loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
+    loadCarColliderOBJ('gt86_collider.obj', 0, { x: -13, y: 0, z: -2 });
+
+    loadCarModel('s13.glb', { x: -23, y: 0, z: -2 });
+    loadCarColliderOBJ('s13_collider.obj', 1, { x: -23, y: 0, z: -2 });
 
     // 銃モデルを読み込む関数
     function loadGunModel(modelName) {
@@ -397,33 +474,45 @@ function init() {
     // --- 衝突判定は cityCollisionMeshes を使うままでOK ---
 
 
-    // 操作切り替え例（F1キーで切り替え）
+    // Fキーで乗車・降車切り替え
     document.addEventListener('keydown', (event) => {
         if (event.code === 'KeyF') {
-            if (!isCarMode && carObject) {
-                // 歩行者モード時、車の近くなら乗る
+            if (!isCarMode) {
+                // 歩行者モード時、最も近い車に乗る
                 const playerPos = controls.getObject().position;
-                const carPos = carObject.position;
-                const dist = playerPos.distanceTo(carPos);
-                if (dist < enterCarDistance) {
+                let minDist = enterCarDistance;
+                let closestCarIdx = -1;
+
+                for (let i = 0; i < cars.length; i++) {
+                    if (cars[i].loaded && cars[i].object) {
+                        const dist = playerPos.distanceTo(cars[i].object.position);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            closestCarIdx = i;
+                        }
+                    }
+                }
+
+                if (closestCarIdx >= 0) {
+                    activeCarIndex = closestCarIdx;
                     isCarMode = true;
                 }
-            } else if (isCarMode) {
+            } else if (isCarMode && activeCarIndex >= 0) {
                 // 車モード時、降りる
                 isCarMode = false;
-                // 車の横に降ろす
-                if (carObject) {
-                    const carPos = carObject.position.clone();
-                    // 車の右側に降ろす（Yは地面高さ）
-                    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(carObject.quaternion).normalize();
+                const car = cars[activeCarIndex];
+                if (car && car.object) {
+                    const carPos = car.object.position.clone();
+                    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(car.object.quaternion).normalize();
                     const exitPos = carPos.clone().add(right.multiplyScalar(2));
                     controls.getObject().position.set(exitPos.x, groundHeight, exitPos.z);
                 }
+                activeCarIndex = -1;
             }
         }
 
         // 車モード時のみ視点切り替え
-        if (isCarMode && carObject) {
+        if (isCarMode && activeCarIndex >= 0) {
             if (event.code === 'Digit1') {
                 carViewMode = 1; // 三人称
             }
@@ -588,6 +677,14 @@ function init() {
             
             // マズルフラッシュエフェクトを銃口に生成
             createMuzzleFlash(muzzlePos, cameraDir);
+            
+            // 銃声SEをランダムで再生
+            const randomIndex = Math.floor(Math.random() * shotAudioElements.length);
+            const audio = shotAudioElements[randomIndex];
+            audio.currentTime = 0; // 最初から再生
+            audio.play().catch(err => {
+                // オートプレイ制限などで再生失敗した場合もスムーズに続行
+            });
     }
     
     // 弾道線生成関数
@@ -723,6 +820,13 @@ function init() {
     }
 
     const controls = new THREE.PointerLockControls(camera, renderer.domElement);
+
+    // スポーン位置とカメラ向きを設定
+    camera.position.copy(spawnPosition);
+    
+    // PointerLockControlsのeulerを使用してカメラの向きを設定
+    const euler = new THREE.Euler(spawnRotation.pitch, spawnRotation.yaw, 0, 'YXZ');
+    camera.quaternion.setFromEuler(euler);
 
     // 移動速度を調整する変数
     let moveSpeed = 0.12; // 走り速度に変更
@@ -912,15 +1016,27 @@ function init() {
 
         const delta = clock.getDelta();
         mixers.forEach(mixer => mixer.update(delta));
-        if (carMixer) carMixer.update(delta);
+        // すべての車のミキサーを更新
+        cars.forEach(car => {
+            if (car.mixer) car.mixer.update(delta);
+        });
 
+        // 乗車可能な車の判定（最も近い車をチェック）
         canEnterCar = false;
-        if (!isCarMode && carObject) {
+        nearestCarIndex = -1;
+        if (!isCarMode) {
             const playerPos = controls.getObject().position;
-            const carPos = carObject.position;
-            if (playerPos.distanceTo(carPos) < enterCarDistance) {
-                canEnterCar = true;
-                // ここで「Fで乗車」などのUI表示も可能
+            let minDist = enterCarDistance;
+
+            for (let i = 0; i < cars.length; i++) {
+                if (cars[i].loaded && cars[i].object) {
+                    const dist = playerPos.distanceTo(cars[i].object.position);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestCarIndex = i;
+                        canEnterCar = true;
+                    }
+                }
             }
         }
 
@@ -968,6 +1084,22 @@ function init() {
             if (moveBackward) moveVec.z += 1;
             if (rotateRight) moveVec.x += 1;
             if (rotateLeft) moveVec.x -= 1;
+            
+            // 足音の再生（走行中かつ地面にいる時のみ）
+            if (moveVec.length() > 0 && !isShooting && !isJumping) {
+                const currentTime = Date.now() / 1000; // 秒単位
+                if (currentTime - lastStepTime >= stepSoundInterval) {
+                    // ランダムに足音を選択して再生
+                    const randomIndex = Math.floor(Math.random() * stepAudioElements.length);
+                    const audio = stepAudioElements[randomIndex];
+                    audio.currentTime = 0; // 最初から再生
+                    audio.play().catch(err => {
+                        // オートプレイ制限などで再生失敗した場合もスムーズに続行
+                    });
+                    lastStepTime = currentTime;
+                }
+            }
+            
             if (moveVec.length() > 0) {
                 moveVec.normalize();
                 moveVec.applyQuaternion(camera.quaternion);
@@ -1039,7 +1171,9 @@ function init() {
             // 車モード時は銃を非表示
             gunObject.visible = false;
         }
-        if (isCarMode && carObject) {
+        if (isCarMode && activeCarIndex >= 0 && activeCarIndex < cars.length) {
+            const car = cars[activeCarIndex];
+            const carObject = car.object;
             // パラメータ
             const carMass = 1250; // kg
             const carPower = 200 * 0.7355 * 1000; // 200ps→kW→W
@@ -1049,14 +1183,14 @@ function init() {
             const carTireRadius = 0.32; // m
             const carInertia = 2500;
 
-            // 状態変数
-            if (!window.carState) {
-                window.carState = {
+            // 状態変数（車ごとに異なる状態を保持）
+            if (!car.state) {
+                car.state = {
                     vx: 0, vy: 0, yaw: carObject.rotation.y, yawRate: 0,
                     throttle: 0, brake: 0, steer: 0, slipAngle: 0
                 };
             }
-            const state = window.carState;
+            const state = car.state;
 
             // 入力
             state.throttle = carForward ? 1 : 0;
@@ -1117,28 +1251,27 @@ function init() {
             carObject.position.add(worldRight.clone().multiplyScalar(state.vy * delta));
             carObject.rotation.y = state.yaw;
 
-            // サスペンション・ロール（ロールはrotation.zで表現、rotation.xは常に0にする）
-            if (!window.suspensionRoll) window.suspensionRoll = 0;
-            // ロール量の係数を小さくし、最大値を制限
-            const rollCoef = 0.12; // ← 0.1～0.2程度で十分
+            // サスペンション・ロール（各車両ごとに状態を保持）
+            if (!car.userData.suspensionRoll) car.userData.suspensionRoll = 0;
+            const rollCoef = 0.12;
             const maxRoll = Math.PI / 10;
             const rollTarget = THREE.MathUtils.clamp(-state.yawRate * rollCoef, -maxRoll, maxRoll);
-            window.suspensionRoll += (rollTarget - window.suspensionRoll) * 0.1;
+            car.userData.suspensionRoll += (rollTarget - car.userData.suspensionRoll) * 0.1;
             carObject.rotation.x = 0;
-            carObject.rotation.z = window.suspensionRoll;
+            carObject.rotation.z = car.userData.suspensionRoll;
 
             // 前輪ステア
-            if (!carObject.userData.wheelFR || !carObject.userData.wheelFL) {
+            if (!car.userData.wheelFR || !car.userData.wheelFL) {
                 carObject.traverse(obj => {
-                    if (obj.name === "wheel_FR") carObject.userData.wheelFR = obj;
-                    if (obj.name === "wheel_FL") carObject.userData.wheelFL = obj;
+                    if (obj.name === "wheel_FR") car.userData.wheelFR = obj;
+                    if (obj.name === "wheel_FL") car.userData.wheelFL = obj;
                 });
             }
-            if (carObject.userData.wheelFR) {
-                carObject.userData.wheelFR.rotation.y = steerAngle;
+            if (car.userData.wheelFR) {
+                car.userData.wheelFR.rotation.y = steerAngle;
             }
-            if (carObject.userData.wheelFL) {
-                carObject.userData.wheelFL.rotation.y = steerAngle;
+            if (car.userData.wheelFL) {
+                car.userData.wheelFL.rotation.y = steerAngle;
             }
             // 衝突判定（前方）
             const carFrontPos = carObject.position.clone().add(worldForward.clone().multiplyScalar(1.0)); // 前面から発射
@@ -1179,6 +1312,11 @@ function init() {
             const speedKmh = speed * 3.6;
             speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
 
+            // 乗車中の車のコライダーを即座に同期（走行中の追従性を重視）
+            if (car.colliderObject) {
+                car.colliderObject.position.copy(carObject.position);
+                car.colliderObject.quaternion.copy(carObject.quaternion);
+            }
 
             // --- カメラ追従修正 ---
             const carPos = carObject.position.clone();
@@ -1318,12 +1456,16 @@ function init() {
 
         // ミニマップを描画
         drawMinimap();
-        if (isCarMode && carObject && carColliderObject) {
-            // 位置・回転を直接代入するのではなく、スムーズに補間して追従させる
-            const lerpAlpha = 0.5; // 0.0～1.0（値を小さくするとより滑らか）
-            carColliderObject.position.lerp(carObject.position, lerpAlpha);
-            carColliderObject.quaternion.slerp(carObject.quaternion, lerpAlpha);
-        }
+        
+        // すべての車のコライダーを同期
+        cars.forEach((car, index) => {
+            if (car.object && car.colliderObject) {
+                // 位置・回転を直接代入するのではなく、スムーズに補間して追従させる
+                const lerpAlpha = 0.5;
+                car.colliderObject.position.lerp(car.object.position, lerpAlpha);
+                car.colliderObject.quaternion.slerp(car.object.quaternion, lerpAlpha);
+            }
+        });
     }
     // ミニマップ描画関数
     function drawMinimap() {
