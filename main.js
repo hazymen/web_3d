@@ -209,6 +209,21 @@ function init() {
     const shootingRateLimit = 100; // ミリ秒（0.1秒ごとに連射）
     let lastShotTime = 0;
 
+    // ===== オーディオコンテキスト初期化（GitHub Pages等のオートプレイ制限対策） =====
+    let audioContextInitialized = false;
+    function initAudioContext() {
+        if (!audioContextInitialized) {
+            // 一度でいいのでダミー音声を再生することでオーディオコンテキストを有効化
+            const dummyAudio = new Audio();
+            dummyAudio.volume = 0; // 無音
+            dummyAudio.play().catch(() => {
+                // エラーは無視
+            });
+            audioContextInitialized = true;
+        }
+    }
+    // =====================
+
     // ===== 足音SE設定 =====
     const stepSoundFiles = [
         'SE/step1.mp3',
@@ -838,6 +853,7 @@ function init() {
 
     canvasElement.addEventListener('click', () => {
         controls.lock();
+        initAudioContext(); // オーディオコンテキストを初期化
     });
 
     const fpsDiv = document.createElement('div');
