@@ -4,6 +4,143 @@ function init() {
     const width = 1600;
     const height = 900;
 
+    // === Web Audio API セットアップ ===
+    const engineAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    let engineOscillators = []; // 複数の倍音用
+    let engineGain = null;
+    let engineNoiseGain = null;
+    let engineFilter = null;
+    let noiseSource = null;
+    let enginePanner = null; // 3Dオーディオ用パンナー
+    
+    // エンジン音の初期化（より現実的）
+    function initEngineAudio() {
+        // ゲイン（マスターボリューム）
+        engineGain = engineAudioContext.createGain();
+        engineGain.gain.setValueAtTime(0.08, engineAudioContext.currentTime);
+        
+        // 3Dパンニング（ステレオ化）
+        enginePanner = engineAudioContext.createStereoPanner();
+        enginePanner.pan.setValueAtTime(0, engineAudioContext.currentTime);
+        
+        // フィルター（エンジンの共鳴を表現）
+        engineFilter = engineAudioContext.createBiquadFilter();
+        engineFilter.type = 'peaking';
+        engineFilter.frequency.setValueAtTime(200, engineAudioContext.currentTime);
+        engineFilter.gain.setValueAtTime(8, engineAudioContext.currentTime);
+        engineFilter.Q.setValueAtTime(1.5, engineAudioContext.currentTime);
+        
+        // 複数のオシレーター（倍音）
+        for (let i = 1; i <= 3; i++) {
+            const osc = engineAudioContext.createOscillator();
+            osc.type = i === 1 ? 'sine' : 'triangle'; // 基本波はSine、倍音はTriangle
+            osc.frequency.setValueAtTime(100 * i, engineAudioContext.currentTime);
+            
+            const oscGain = engineAudioContext.createGain();
+            oscGain.gain.setValueAtTime(0.3 / i, engineAudioContext.currentTime); // 倍音は減衰
+            
+            osc.connect(oscGain);
+            oscGain.connect(engineFilter);
+            
+            engineOscillators.push(osc);
+            osc.start();
+        }
+        
+        // ノイズ生成（エンジンの粗い音、より複雑）
+        const bufferSize = engineAudioContext.sampleRate * 0.2;
+        const noiseBuffer = engineAudioContext.createBuffer(1, bufferSize, engineAudioContext.sampleRate);
+        const noiseData = noiseBuffer.getChannelData(0);
+        
+        // ブラウン・ノイズのような複雑なノイズ
+        let lastValue = 0;
+        for (let i = 0; i < bufferSize; i++) {
+            const white = Math.random() * 2 - 1;
+            lastValue = (lastValue + white * 0.1) * 0.95; // 低周波フィルター
+            noiseData[i] = lastValue;
+        }
+        
+        noiseSource = engineAudioContext.createBufferSource();
+        noiseSource.buffer = noiseBuffer;
+        noiseSource.loop = true;
+        
+        engineNoiseGain = engineAudioContext.createGain();
+        engineNoiseGain.gain.setValueAtTime(0.04, engineAudioContext.currentTime);
+        
+        // ノイズフィルター（高周波カット）
+        const noiseFilter = engineAudioContext.createBiquadFilter();
+        noiseFilter.type = 'lowpass';
+        noiseFilter.frequency.setValueAtTime(3000, engineAudioContext.currentTime);
+        
+        noiseSource.connect(noiseFilter);
+        noiseFilter.connect(engineNoiseGain);
+        
+        // マスター接続
+        engineFilter.connect(engineGain);
+        engineNoiseGain.connect(engineGain);
+        engineGain.connect(enginePanner);
+        enginePanner.connect(engineAudioContext.destination);
+        
+        noiseSource.start();
+    }
+    
+    // エンジン音更新（RPM、スロットル、距離に応じてピッチと音量を変更）
+    function updateEngineAudio(rpm, throttle, carPosition, cameraPosition) {
+        if (engineOscillators.length === 0) {
+            initEngineAudio();
+        }
+        
+        // 距離を計算
+        let distance = 100; // デフォルト（聞こえない距離）
+        if (carPosition && cameraPosition) {
+            const dx = carPosition.x - cameraPosition.x;
+            const dy = carPosition.y - cameraPosition.y;
+            const dz = carPosition.z - cameraPosition.z;
+            distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        
+        // 距離に基づいて音量を計算（10m以内で最大、30m以上で無音）
+        const maxDistance = 30;
+        const minDistance = 2;
+        let distanceVolume = 1.0;
+        if (distance > minDistance) {
+            distanceVolume = Math.max(0, 1 - (distance - minDistance) / (maxDistance - minDistance));
+        }
+        
+        // RPMからエンジン周波数を計算（4気筒エンジンの点火間隔を想定）
+        const baseFrequency = Math.max(20, (rpm / 30)); // 20-233Hz（0-7000RPM）
+        
+        // 複数のオシレーターをアップデート
+        engineOscillators.forEach((osc, index) => {
+            const harmonicFrequency = baseFrequency * (index + 1);
+            osc.frequency.exponentialRampToValueAtTime(
+                Math.max(20, harmonicFrequency),
+                engineAudioContext.currentTime + 0.05
+            );
+        });
+        
+        // スロットルと距離に応じて音量を調整
+        const baseVolume = (0.05 + Math.abs(throttle) * 0.08) * distanceVolume;
+        engineGain.gain.linearRampToValueAtTime(baseVolume, engineAudioContext.currentTime + 0.05);
+        
+        // RPMに応じてノイズレベルを調整（低RPMで粗い音）
+        const noiseAmount = (0.04 + (1 - Math.min(1, rpm / 4000)) * 0.06) * distanceVolume;
+        engineNoiseGain.gain.linearRampToValueAtTime(noiseAmount, engineAudioContext.currentTime + 0.05);
+        
+        // フィルター周波数をRPMに応じて動的に変更
+        engineFilter.frequency.linearRampToValueAtTime(
+            Math.min(500, 150 + rpm / 20),
+            engineAudioContext.currentTime + 0.05
+        );
+        
+        // ステレオパンニング（左右の位置に応じて音の位置を変更）
+        if (carPosition && cameraPosition) {
+            const relativeX = carPosition.x - cameraPosition.x;
+            // -1（左）から 1（右）の範囲にクランプ
+            const panValue = Math.max(-1, Math.min(1, relativeX / 50));
+            enginePanner.pan.linearRampToValueAtTime(panValue, engineAudioContext.currentTime + 0.1);
+        }
+    }
+
     // レンダラーを作成
     const canvasElement = document.querySelector('#myCanvas');
     const renderer = new THREE.WebGLRenderer({
@@ -36,6 +173,7 @@ function init() {
     let carBackward = false;
     let carLeft = false;
     let carRight = false;
+    let carBrake = false; // ブレーキ入力（Shift キー）
     
     let overviewMode = false; // Hキーで俯瞰図モード
     let savedCameraPosition = null;
@@ -386,21 +524,31 @@ function init() {
     }
 
     // 車の当たり判定用OBJモデルを読み込む関数
-    function loadCarColliderOBJ(objName, carIndex, position, scale = {x:1, y:1, z:1}) {
+    function loadCarColliderOBJ(objName, carIndex, position, scale = {x:1, y:1, z:1}, offset = {x:0, y:0, z:0}) {
         const objLoader = new THREE.OBJLoader();
         objLoader.load(`models/${objName}`, function(object) {
             const colliderMeshes = [];
+            let geometryCenter = new THREE.Vector3();
+            let meshCount = 0;
+            
             object.traverse(function(child) {
                 if (child.isMesh) {
                     // コライダーメッシュの表示用マテリアル（半透明の緑）
                     child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.3, visible: true, wireframe: false });
-                    // 衝突判定用に配列へ追加
-                    collisionMeshes.push(child);
-                    colliderMeshes.push(child); // 車固有のメッシュ配列にも追加
+                    // 車固有のメッシュ配列にのみ追加（collisionMeshesには追加しない）
+                    colliderMeshes.push(child); // 車固有のメッシュ配列にのみ追加
                     // boundingBoxを明示的に計算
                     if (!child.geometry.boundingBox) {
                         child.geometry.computeBoundingBox();
                     }
+                    
+                    // ジオメトリの中心を計算（複数メッシュがある場合の平均）
+                    const bbox = child.geometry.boundingBox;
+                    const meshCenter = new THREE.Vector3();
+                    bbox.getCenter(meshCenter);
+                    geometryCenter.add(meshCenter);
+                    meshCount++;
+                    
                     // ワイヤーフレームを追加（表示）
                     const wireframe = new THREE.LineSegments(
                         new THREE.WireframeGeometry(child.geometry),
@@ -414,15 +562,68 @@ function init() {
                     child.visible = false; // メッシュを表示（デバッグ用）
                 }
             });
-            object.position.set(position.x, position.y, position.z);
-            object.scale.set(scale.x, scale.y, scale.z);
-            scene.add(object);
-
+            
+            // 複数メッシュがある場合は平均を取る
+            if (meshCount > 0) {
+                geometryCenter.divideScalar(meshCount);
+                // コンソールに出力して、ユーザーが確認できるようにする
+                console.log(`[${objName}] Geometry Center: (${geometryCenter.x.toFixed(2)}, ${geometryCenter.y.toFixed(2)}, ${geometryCenter.z.toFixed(2)})`);
+                console.log(`[${objName}] Current Offset: (${offset.x}, ${offset.y}, ${offset.z})`);
+            }
+            
             // 対応する車データを更新
-            if (carIndex >= 0 && carIndex < cars.length) {
+            if (carIndex >= 0 && carIndex < cars.length && cars[carIndex].object) {
+                // 親オブジェクトが存在する場合は子要素として追加
+                // ジオメトリの中心をキャンセルして、モデルの原点に合わせる
+                const finalOffset = {
+                    x: offset.x - geometryCenter.x,
+                    y: offset.y - geometryCenter.y,
+                    z: offset.z - geometryCenter.z
+                };
+                
+                object.position.set(finalOffset.x, finalOffset.y, finalOffset.z);
+                object.scale.set(scale.x, scale.y, scale.z);
+                object.rotation.set(0, 0, 0);
+                
+                cars[carIndex].object.add(object);
                 cars[carIndex].colliderObject = object;
                 cars[carIndex].colliderMeshes = colliderMeshes;
                 cars[carIndex].colliderLoaded = true;
+                
+                console.log(`[${objName}] Final Offset Applied: (${finalOffset.x.toFixed(2)}, ${finalOffset.y.toFixed(2)}, ${finalOffset.z.toFixed(2)})`);
+            } else {
+                // 親がまだ追加されていない場合は後で追加するまで待機
+                // 最大3秒間、500ms毎に親の追加を確認
+                let attempts = 0;
+                const attachCollider = setInterval(() => {
+                    attempts++;
+                    if (carIndex >= 0 && carIndex < cars.length && cars[carIndex].object) {
+                        // 親が追加されたので、子要素として追加
+                        const finalOffset = {
+                            x: offset.x - geometryCenter.x,
+                            y: offset.y - geometryCenter.y,
+                            z: offset.z - geometryCenter.z
+                        };
+                        
+                        object.position.set(finalOffset.x, finalOffset.y, finalOffset.z);
+                        object.scale.set(scale.x, scale.y, scale.z);
+                        object.rotation.set(0, 0, 0);
+                        
+                        cars[carIndex].object.add(object);
+                        cars[carIndex].colliderObject = object;
+                        cars[carIndex].colliderMeshes = colliderMeshes;
+                        cars[carIndex].colliderLoaded = true;
+                        clearInterval(attachCollider);
+                        
+                        console.log(`[${objName}] Final Offset Applied (delayed): (${finalOffset.x.toFixed(2)}, ${finalOffset.y.toFixed(2)}, ${finalOffset.z.toFixed(2)})`);
+                    } else if (attempts >= 6) {
+                        // タイムアウト：親が見つからない場合はシーンに直接追加
+                        object.position.set(position.x, position.y, position.z);
+                        object.scale.set(scale.x, scale.y, scale.z);
+                        scene.add(object);
+                        clearInterval(attachCollider);
+                    }
+                }, 500);
             }
         });
     }
@@ -456,7 +657,8 @@ function init() {
 
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
-    loadCarColliderOBJ('gt86_collider.obj', 0, { x: -13, y: 0, z: -2 });
+    // オフセットを調整（モデルの原点ズレを補正：自動計算）
+    loadCarColliderOBJ('gt86_collider.obj', 0, { x: -13, y: 0, z: -2 }, {x:1, y:1, z:1}, { x: 0, y: -1.02, z: -0.17 });
     // 車を地形に配置（少し遅延させて地形メッシュが準備できるのを待つ）
     setTimeout(() => {
         if (cars.length > 0 && cars[0].object) {
@@ -465,7 +667,8 @@ function init() {
     }, 500);
 
     loadCarModel('s13.glb', { x: -23, y: 0, z: -2 });
-    loadCarColliderOBJ('s13_collider.obj', 1, { x: -23, y: 0, z: -2 });
+    // オフセットを調整（モデルの原点ズレを補正：自動計算）
+    loadCarColliderOBJ('s13_collider.obj', 1, { x: -23, y: 0, z: -2 }, {x:1, y:1, z:1}, { x: 0.08, y: -1.02, z: -0.07 });
     // 車を地形に配置（少し遅延させて地形メッシュが準備できるのを待つ）
     setTimeout(() => {
         if (cars.length > 1 && cars[1].object) {
@@ -507,42 +710,16 @@ function init() {
     // 銃を読み込み
     loadGunModel('vandal.glb');
 
-    const cityCollisionMeshes = []; // city_collider.obj専用の当たり判定用配列
+    // const cityCollisionMeshes = []; // city_collider.obj専用の当たり判定用配列（無効化）
+    const cityCollisionMeshes = []; // 衝突判定を無効化するため、空配列のままにする
     const groundCollisionMeshes = []; // city_ground.glb用地面判定配列（坂道対応）
 
-    // city_collider.objを読み込み、当たり判定用にする関数
-    function loadCityColliderOBJ(objName, position, scale = {x:1, y:1, z:1}) {
-        const objLoader = new THREE.OBJLoader();
-        objLoader.load(`models/${objName}`, function(object) {
-            object.traverse(function(child) {
-                if (child.isMesh) {
-                    // 透明マテリアル（当たり判定用・非表示）
-                    child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.1, visible: false });
-                    // 衝突判定用に配列へ追加
-                    cityCollisionMeshes.push(child);
-                    // boundingBoxを明示的に計算
-                    if (!child.geometry.boundingBox) {
-                        child.geometry.computeBoundingBox();
-                    }
-                    // ワイヤーフレームを追加して緑色の線で描画
-                    const wireframe = new THREE.LineSegments(
-                        new THREE.WireframeGeometry(child.geometry),
-                        new THREE.LineBasicMaterial({ color: 0x00ff00 })
-                    );
-                    wireframe.position.copy(child.position);
-                    wireframe.rotation.copy(child.rotation);
-                    wireframe.scale.copy(child.scale);
-                    child.add(wireframe);
-                    child.visible = true; // ワイヤーフレームだけ見せる
-                }
-            });
-            object.position.set(position.x, position.y, position.z);
-            object.scale.set(scale.x, scale.y, scale.z);
-            scene.add(object);
-        });
-    }
+    // city_collider.objを読み込み、当たり判定用にする関数（無効化）
+    // function loadCityColliderOBJ(objName, position, scale = {x:1, y:1, z:1}) {
+    //     // 無効化
+    // }
 
-    // city.glb自体は見た目用として配置（同時に当たり判定用メッシュも収集）
+    // city.glb自体は見た目用として配置（衝突判定も有効）
     function loadCityModel(modelName, position) {
         const gltfLoader = new THREE.GLTFLoader();
         gltfLoader.load(`models/${modelName}`, function(gltf) {
@@ -551,7 +728,7 @@ function init() {
                     child.castShadow = true;
                     child.receiveShadow = true;
                     child.frustumCulled = true;
-                    // 町のモデルのメッシュを当たり判定用に追加
+                    // 町のモデルのメッシュを当たり判定用に追加（city_collider.objの代わり）
                     cityCollisionMeshes.push(child);
                 }
             });
@@ -563,7 +740,7 @@ function init() {
 
     // --- 読み込み呼び出し例 ---
     loadCityModel('city3.glb', { x: 0, y: 0.01, z: 0 });
-    loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 });
+    // loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 }); // 無効化
 
     // 地面モデル（city_ground.glb）を読み込む関数
     function loadGroundModel(modelName, position) {
@@ -718,6 +895,8 @@ function init() {
                 case 'KeyS': carBackward = true; break;
                 case 'KeyA': carLeft = true; break;
                 case 'KeyD': carRight = true; break;
+                case 'ShiftLeft':
+                case 'ShiftRight': carBrake = true; break;
                 case 'KeyH':
                     if (!overviewMode) {
                         overviewMode = true;
@@ -751,6 +930,8 @@ function init() {
                 case 'KeyS': carBackward = false; break;
                 case 'KeyA': carLeft = false; break;
                 case 'KeyD': carRight = false; break;
+                case 'ShiftLeft':
+                case 'ShiftRight': carBrake = false; break;
                 case 'KeyH':
                     overviewMode = false;
                     if (savedCameraPosition && savedCameraQuaternion) {
@@ -1066,17 +1247,25 @@ function init() {
 
     // speedDivの生成部分をコメントアウトまたは削除
     
+    // スピードメーター＋タコメーター表示用DIV
     const speedDiv = document.createElement('div');
     speedDiv.style.position = 'absolute';
     speedDiv.style.right = '10px';
-    speedDiv.style.bottom = '10px';
-    speedDiv.style.color = '#fff';
-    speedDiv.style.background = 'rgba(0,0,0,0.5)';
-    speedDiv.style.padding = '4px 12px';
-    speedDiv.style.fontFamily = 'monospace';
-    speedDiv.style.fontSize = '18px';
-    speedDiv.style.zIndex = '100';
-    speedDiv.innerText = '';
+    speedDiv.style.bottom = '210px';
+    speedDiv.style.color = '#0f0';
+    speedDiv.style.background = 'rgba(0,0,0,0.9)';
+    speedDiv.style.padding = '15px 25px';
+    speedDiv.style.fontFamily = 'Courier New, monospace';
+    speedDiv.style.fontSize = '16px';
+    speedDiv.style.fontWeight = 'bold';
+    speedDiv.style.zIndex = '1000';
+    speedDiv.style.whiteSpace = 'pre';
+    speedDiv.style.border = '3px solid #0f0';
+    speedDiv.style.display = 'block';
+    speedDiv.style.lineHeight = '1.8';
+    speedDiv.style.borderRadius = '8px';
+    speedDiv.style.textAlign = 'center';
+    speedDiv.innerText = 'Not in car';
     document.body.appendChild(speedDiv);
     
     // 車両回転情報表示用DIV
@@ -1434,68 +1623,205 @@ function init() {
         if (isCarMode && activeCarIndex >= 0 && activeCarIndex < cars.length) {
             const car = cars[activeCarIndex];
             const carObject = car.object;
-            // パラメータ
-            const carMass = 1250; // kg
-            const carPower = 200 * 0.7355 * 1000; // 200ps→kW→W
-            const carGripFront = 1.2;
-            const carGripRear = 1.0;
+            
+            // === シンプルで安定した車の物理パラメータ ===
+            const carMass = 1250; // kg（実際の86は1238kg）
+            const carMaxPowerHP = 207; // 最大馬力（実際の86は207PS）
+            const carMaxPowerW = carMaxPowerHP * 0.7355 * 1000; // ps→W
+            const carMaxTorque = 212; // 最大トルク (N・m)（実際の86は212N·m）
+            const carMaxRPM = 7000; // 最大回転数（実際の86は7000RPM）
             const carWheelBase = 2.6; // m
             const carTireRadius = 0.32; // m
-            const carInertia = 2500;
-
-            // 状態変数（車ごとに異なる状態を保持）
+            const carInertia = 2500; // kg・m²
+            
+            // === 6速マニュアルトランスミッション ===
+            const gearRatios = [3.635, 2.188, 1.562, 1.194, 1.000, 0.819]; // 実際の86のギア比
+            const reverseGearRatio = 3.5; // リバースギア比（バック用）
+            const finalDriveRatio = 4.1; // 実際の86のファイナルドライブ比
+            
+            // グリップパラメータ（超強化版）
+            const carGripFront = 1.6; // 前輪グリップ
+            const carGripRear = 1.4; // 後輪グリップ
+            
+            // 状態変数
             if (!car.state) {
                 car.state = {
                     vx: 0, vy: 0, yaw: carObject.rotation.y, yawRate: 0,
-                    throttle: 0, brake: 0, steer: 0, slipAngle: 0
+                    throttle: 0, brake: 0, steer: 0,
+                    // エンジン・トランスミッション
+                    engineRPM: 0,
+                    currentGear: 1,
+                    wheelRPM: 0,
+                    isBackingUp: false // バック開始フラグ
                 };
             }
             const state = car.state;
 
-            // 入力
+            // === 入力処理 ===
             state.throttle = carForward ? 1 : 0;
-            state.brake = 0; // ブレーキは常に0に
-            if (carBackward) state.throttle = -0.2; // バック時は低速で
+            
+            // Sキーの処理：バック開始フラグを使用
+            if (carBackward) {
+                if (!state.isBackingUp) {
+                    // バック開始前：速度がある場合はブレーキ、ない場合はバック開始
+                    const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
+                    if (speed > 0.5) {
+                        // 速度がある場合：ブレーキ処理
+                        state.brake = 1;
+                        state.throttle = 0;
+                    } else {
+                        // 速度が0に近い場合：バック開始
+                        state.isBackingUp = true;
+                        state.brake = 0;
+                        state.throttle = -1.0;
+                    }
+                } else {
+                    // バック中：継続
+                    state.brake = 0;
+                    state.throttle = -1.0;
+                }
+            } else {
+                // Sキーを離した：バック終了
+                state.isBackingUp = false;
+                state.brake = carBrake ? 1 : 0;
+            }
+            
             let steerInput = 0;
             if (carLeft && !carRight) steerInput = 1;
             else if (carRight && !carLeft) steerInput = -1;
-            state.steer += (steerInput - state.steer) * 0.2;
+            state.steer += (steerInput - state.steer) * 0.25;
 
-            // ステア最大角（速度依存で減少）
             const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
-            const steerMax = (speed < 10) ? 0.6 : 0.25 + 0.35 * Math.max(0, 1 - (speed - 10) / 50);
+            const steerMax = (speed < 10) ? 0.7 : 0.3 + 0.4 * Math.max(0, 1 - (speed - 10) / 50);
             let steerAngle = state.steer * steerMax;
-            // バック時はステア操作を逆にする
-            if (state.vx < 0) {
-                steerAngle = -steerAngle;
+            if (state.vx < 0) steerAngle = -steerAngle;
+
+            // === ホイール RPM を計算 ===
+            // 走行速度からホイール回転数を計算（キロ補正：km/h → m/s）
+            const speedMS = speed; // m/s
+            // バック時は負の速度でも絶対値でRPMを計算
+            state.wheelRPM = (Math.abs(state.vx) / (carTireRadius * 2 * Math.PI)) * 60; // RPM
+            
+            // === ギア比を取得（バック時はRギア） ===
+            let gearRatio;
+            if (state.throttle < 0) {
+                // バック時：リバースギア比を使用
+                gearRatio = reverseGearRatio;
+            } else {
+                // 前進時：通常のギア比
+                gearRatio = gearRatios[Math.max(0, Math.min(5, state.currentGear - 1))];
+            }
+            
+            // === エンジン RPM を計算（バック時も上昇） ===
+            // エンジン RPM = ホイール RPM × ギア比 × ファイナルドライブ比
+            const engineRPMFromWheel = state.wheelRPM * gearRatio * finalDriveRatio;
+            state.engineRPM = Math.max(1000, engineRPMFromWheel); // アイドル最小 1000 RPM、上限なし
+            
+            // === 自動変速ロジック（ギアが一度に複数段上がらないよう制限） ===
+            const shiftUpRPM = carMaxRPM * 0.80; // 回転数の80%でシフトアップ
+            const shiftDownRPM = carMaxRPM * 0.40; // 回転数の40%でシフトダウン（改善：25%から40%に引き上げ）
+            
+            // バック時（throttle < 0）はシフトを禁止し、Rギアに固定
+            if (state.throttle >= 0) {
+                if (state.engineRPM > shiftUpRPM && state.currentGear < 6) {
+                    state.currentGear++;
+                } else if (state.engineRPM < shiftDownRPM && state.currentGear > 1) {
+                    // シフトダウン条件を改善：スロットルに関わらずギアダウン可能
+                    state.currentGear--;
+                }
+            } else {
+                // バック時は1速にリセット（Rギアの計算で使用）
+                state.currentGear = 1;
+            }
+            
+            // === 駆動力（トルク曲線最適化） ===
+            // 実際の86のトルク特性：1500-6000 RPMで212N・mの高いトルク
+            let engineTorque = 0;
+            if (state.throttle !== 0) {
+                const normalizedRPM = Math.max(1000, Math.abs(state.engineRPM));
+                
+                // トルク曲線：バック時は低RPMでも最大トルク、前進時は段階的上昇
+                let torqueCurve = 1.0;
+                
+                if (state.throttle < 0) {
+                    // バック時：低RPMでも常に最大トルクを出す（簡単加速）
+                    torqueCurve = 1.0;
+                } else {
+                    // 前進時：通常のトルク曲線
+                    if (normalizedRPM < 1500) {
+                        // 低回転域：1000-1500RPM で段階的に上昇
+                        torqueCurve = 0.85 + (normalizedRPM - 1000) / 500 * 0.15; // 0.85 → 1.0
+                    } else if (normalizedRPM < 6000) {
+                        // ピーク域：1500-6000RPM で常に 1.0（最大トルク212N・m）
+                        torqueCurve = 1.0;
+                    } else {
+                        // 高回転域：6000RPM以降は緩く低下
+                        const overRevRatio = (normalizedRPM - 6000) / 1000;
+                        torqueCurve = Math.max(0.7, 1.0 - overRevRatio * 0.15);
+                    }
+                }
+                
+                // トルク = ピークトルク × トルク曲線 × スロットル
+                engineTorque = carMaxTorque * torqueCurve * state.throttle;
+            }
+            
+            // ホイールに伝達されるトルク（ギア比で増幅）
+            const wheelTorque = engineTorque * gearRatio * finalDriveRatio;
+            let driveForce = wheelTorque / carTireRadius; // F = τ / r
+            // バック時（throttle < 0）はより大きな力を許容
+            if (state.throttle < 0) {
+                // バック時は駆動力の制限を最大まで拡大
+                driveForce = Math.max(Math.min(driveForce, 25000), -25000);
+            } else {
+                driveForce = Math.max(Math.min(driveForce, 16000), -4000);
             }
 
-            // 駆動力（FR：後輪のみ駆動）
-            const maxForce = carPower / Math.max(speed, 0.5); // バック時の速度計算を改善
-            let driveForce = state.throttle * maxForce;
-            driveForce = Math.max(Math.min(driveForce, 6000), -3000); // バック時は-3000まで制限
+            // === タイヤ横力（スリップ角に基づく） ===
+            const slipAngleFront = Math.atan2(state.vy + carWheelBase / 2 * state.yawRate, Math.max(Math.abs(state.vx), 0.1)) - steerAngle;
+            const slipAngleRear = Math.atan2(state.vy - carWheelBase / 2 * state.yawRate, Math.max(Math.abs(state.vx), 0.1));
+            
+            // スリップ角を制限して飽和させる
+            const slipFrontClamped = Math.max(-0.35, Math.min(0.35, slipAngleFront)); // 範囲を拡大
+            const slipRearClamped = Math.max(-0.35, Math.min(0.35, slipAngleRear));
+            
+            const tireForceFront = -Math.sin(slipFrontClamped) * carGripFront * 8000; // 力を大幅に増強
+            const tireForceRear = -Math.sin(slipRearClamped) * carGripRear * 8000;
 
-            // ブレーキ力
-            let brakeForce = state.brake * 8000;
+            // === ブレーキ力（適度な減速） ===
+            let brakingForce = 0;
+            if (state.brake > 0 && speed > 0.1) {
+                // ブレーキ力 = 車体速度に応じて、最大 20000 N の制動
+                brakingForce = -Math.sign(state.vx) * Math.min(20000, Math.abs(state.vx) * 3000);
+            }
 
-            // タイヤ横力（バック時も正しく計算するため Math.max の代わりに Math.abs を使用）
-            const slipAngleFront = Math.atan2(state.vy + carWheelBase * state.yawRate / 2, Math.max(Math.abs(state.vx), 0.1)) - steerAngle;
-            const slipAngleRear = Math.atan2(state.vy - carWheelBase * state.yawRate / 2, Math.max(Math.abs(state.vx), 0.1));
-            const tireForceFront = -carGripFront * slipAngleFront * 8000;
-            const tireForceRear = -carGripRear * slipAngleRear * 8000;
+            // === 力を合算（車体座標系） ===
+            const forceX = driveForce + brakingForce + tireForceRear * Math.sin(steerAngle) + tireForceFront * Math.sin(steerAngle);
+            const forceY = tireForceFront * Math.cos(steerAngle) + tireForceRear;
 
-            // 前後タイヤ合成
-            const forceX = driveForce - brakeForce + tireForceRear * Math.sin(steerAngle) + tireForceFront * Math.sin(steerAngle);
-            const forceY = tireForceFront * Math.cos(steerAngle) + tireForceRear * Math.cos(0);
-
-            // 車体速度・ヨー角速度の更新
+            // === 速度・ヨー角速度の更新 ===
             state.vx += (forceX / carMass) * delta;
             state.vy += (forceY / carMass) * delta;
-            state.vx *= 0.995;
-            state.vy *= 0.995;
-
-            state.yawRate += ((carWheelBase / 2) * (tireForceFront - tireForceRear) / carInertia) * delta;
-            state.yawRate *= 0.98;
+            
+            // 摩擦（リアルな抵抗）
+            // バック時はさらに摩擦を削減
+            if (state.throttle < 0) {
+                state.vx *= 0.9999; // バック時は極めて低い抵抗
+            } else {
+                state.vx *= 0.9992; // 前進時の摩擦
+            }
+            state.vy *= 0.97; // 横滑り速度の減衰
+            
+            // === バック最高速の制限 ===
+            // バック時（state.throttle < 0）の最高速を10km/h（約2.78 m/s）に制限
+            const maxBackupSpeed = 2.78; // 10 km/h
+            if (state.throttle < 0 && state.vx < -maxBackupSpeed) {
+                state.vx = -maxBackupSpeed;
+            }
+            
+            // トルク（Ackermann幾何学に基づく）
+            const torque = (carWheelBase / 2) * (tireForceFront * Math.cos(steerAngle) - tireForceRear);
+            state.yawRate += (torque / carInertia) * delta;
+            state.yawRate *= 0.97; // ヨー角速度の減衰を弱める
             state.yaw += state.yawRate * delta;
 
             // --- 進行方向ベクトル修正（Three.js標準：Zマイナスが前方） ---
@@ -1511,27 +1837,49 @@ function init() {
             carObject.position.add(worldRight.clone().multiplyScalar(state.vy * delta));
             carObject.rotation.y = state.yaw;
 
-            // サスペンション・ロール（各車両ごとに状態を保持）
-            if (!car.userData.suspensionRoll) car.userData.suspensionRoll = 0;
-            const rollCoef = 0.12;
-            const maxRoll = Math.PI / 10;
-            const rollTarget = THREE.MathUtils.clamp(-state.yawRate * rollCoef, -maxRoll, maxRoll);
-            car.userData.suspensionRoll += (rollTarget - car.userData.suspensionRoll) * 0.1;
-            carObject.rotation.x = 0;
-            carObject.rotation.z = car.userData.suspensionRoll;
-
-            // 前輪ステア
-            if (!car.userData.wheelFR || !car.userData.wheelFL) {
+            // === ホイール回転とステアアニメーション ===
+            if (!car.userData.wheels) {
+                car.userData.wheels = { FL: null, FR: null, RL: null, RR: null };
                 carObject.traverse(obj => {
-                    if (obj.name === "wheel_FR") car.userData.wheelFR = obj;
-                    if (obj.name === "wheel_FL") car.userData.wheelFL = obj;
+                    if (obj.name === "wheel_FL") car.userData.wheels.FL = obj;
+                    if (obj.name === "wheel_FR") car.userData.wheels.FR = obj;
+                    if (obj.name === "wheel_RL") car.userData.wheels.RL = obj;
+                    if (obj.name === "wheel_RR") car.userData.wheels.RR = obj;
                 });
             }
-            if (car.userData.wheelFR) {
-                car.userData.wheelFR.rotation.y = steerAngle;
+            
+            if (!car.userData.wheelTravelDistance) {
+                car.userData.wheelTravelDistance = 0;
             }
-            if (car.userData.wheelFL) {
-                car.userData.wheelFL.rotation.y = steerAngle;
+            
+            // ホイール回転更新（走行距離に基づく）
+            car.userData.wheelTravelDistance += state.vx * delta;
+            const wheelRotationAngle = (car.userData.wheelTravelDistance / carTireRadius) % (Math.PI * 2);
+            
+            // ホイールメッシュに適用（ステアリングが転がり角度に影響しないよう回転順序を工夫）
+            if (car.userData.wheels.FL) {
+                car.userData.wheels.FL.rotation.order = 'YXZ';
+                car.userData.wheels.FL.rotation.y = steerAngle; // ステアリング（Y軸）
+                car.userData.wheels.FL.rotation.x = wheelRotationAngle; // 転がり（X軸）
+                car.userData.wheels.FL.rotation.z = 0; // キャンバー角なし
+            }
+            if (car.userData.wheels.FR) {
+                car.userData.wheels.FR.rotation.order = 'YXZ';
+                car.userData.wheels.FR.rotation.y = steerAngle; // ステアリング（Y軸）
+                car.userData.wheels.FR.rotation.x = wheelRotationAngle; // 転がり（X軸）
+                car.userData.wheels.FR.rotation.z = 0; // キャンバー角なし
+            }
+            if (car.userData.wheels.RL) {
+                car.userData.wheels.RL.rotation.order = 'YXZ';
+                car.userData.wheels.RL.rotation.y = 0; // 後輪はステアリングなし
+                car.userData.wheels.RL.rotation.x = wheelRotationAngle; // 転がり（X軸）
+                car.userData.wheels.RL.rotation.z = 0; // キャンバー角なし
+            }
+            if (car.userData.wheels.RR) {
+                car.userData.wheels.RR.rotation.order = 'YXZ';
+                car.userData.wheels.RR.rotation.y = 0; // 後輪はステアリングなし
+                car.userData.wheels.RR.rotation.x = wheelRotationAngle; // 転がり（X軸）
+                car.userData.wheels.RR.rotation.z = 0; // キャンバー角なし
             }
             
             // 衝突判定（前方）- 坂道対応版
@@ -1545,11 +1893,12 @@ function init() {
             const carDir = worldForward.clone().normalize();
             
             // 水平方向のレイキャスト（壁衝突検出）
+            // 衝突判定距離を大幅に短縮（近い障害物のみ反応）
             const carRaycaster = new THREE.Raycaster(
                 carFrontPos,
                 carDir,
                 0,
-                Math.max(2.0, Math.abs(state.vx) * 2)
+                Math.max(1.5, Math.abs(state.vx) * 1.5)
             );
             const carIntersects = carRaycaster.intersectObjects(cityCollisionMeshes, true);
             
@@ -1590,37 +1939,93 @@ function init() {
             }
             
             // 水平衝突判定（壁など）
-            if (carIntersects.length > 0 && carIntersects[0].distance < 0.8 && state.vx > 0.1) {
-                state.vx = 0;
-                state.vy = 0;
-                state.yawRate = 0; // ヨー角速度もリセット
-                // 衝突時に車を少し押し戻す
-                carObject.position.add(worldForward.clone().multiplyScalar(-0.1));
+            // 衝突判定の距離を0.6に短縮、かつ地面メッシュを除外
+            // cityCollisionMeshesのみを使用（地面衝突は別途処理）
+            if (carIntersects.length > 0 && carIntersects[0].distance < 0.6) {
+                // 衝突が地面（Y方向が主）でないことを確認
+                const collisionNormal = carIntersects[0].face.normal.clone();
+                // 法線がほぼ上向き（Y > 0.7）の場合は地面なので無視
+                if (Math.abs(collisionNormal.y) < 0.7) {
+                    // 壁などの側面衝突のみ処理
+                    state.vx *= -0.15; // バウンス効果（元の15%）
+                    state.vy *= 0.3; // 横滑りも大幅に減衰
+                    state.yawRate *= 0.5; // ヨー角速度も減衰
+                    // 衝突時に車を少し押し戻す
+                    carObject.position.add(worldForward.clone().multiplyScalar(-0.15));
+                }
             }
             
-            // 地面対応（シンプルな方法：車の中心直下の地面を検出）
+            // 地面対応（4輪の高さを検出して車体を傾ける）
             if (foundGround && groundCollisionMeshes.length > 0) {
-                // 車の中心から直下にレイキャストして最も近い地面を検出
-                const rayOrigin = carObject.position.clone().add(new THREE.Vector3(0, 5.0, 0));
-                const downDir = new THREE.Vector3(0, -1, 0);
-                const carHeightRaycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 15.0);
-                const carHeightIntersects = carHeightRaycaster.intersectObjects(groundCollisionMeshes, true);
+                // 4輪の位置を定義（左右方向はcarRightDir、前後方向はworldForward）
+                const wheelDistFront = 1.0; // 前輪位置までの前後距離
+                const wheelDistRear = 1.0;  // 後輪位置までの前後距離
+                const wheelDistSide = 0.7;  // ホイール左右幅
                 
-                if (carHeightIntersects.length > 0) {
-                    // 最も近い地面が見つかった
-                    const groundY = carHeightIntersects[0].point.y;
-                    const targetHeight = groundY + 0.5; // 車の底から0.5上
+                // 4輪位置の定義
+                const wheelCheckPoints = [
+                    { pos: carObject.position.clone().add(worldForward.clone().multiplyScalar(wheelDistFront)).add(carRightDir.clone().multiplyScalar(wheelDistSide)), name: 'FL' },
+                    { pos: carObject.position.clone().add(worldForward.clone().multiplyScalar(wheelDistFront)).add(carRightDir.clone().multiplyScalar(-wheelDistSide)), name: 'FR' },
+                    { pos: carObject.position.clone().add(worldForward.clone().multiplyScalar(-wheelDistRear)).add(carRightDir.clone().multiplyScalar(wheelDistSide)), name: 'RL' },
+                    { pos: carObject.position.clone().add(worldForward.clone().multiplyScalar(-wheelDistRear)).add(carRightDir.clone().multiplyScalar(-wheelDistSide)), name: 'RR' }
+                ];
+                
+                const wheelHeights = {};
+                let allWheelsOnGround = true;
+                
+                // 各輪の地面高さを検出
+                for (const wheelPoint of wheelCheckPoints) {
+                    const wheelRaycaster = new THREE.Raycaster(
+                        wheelPoint.pos.clone().add(new THREE.Vector3(0, 3.0, 0)),
+                        new THREE.Vector3(0, -1, 0),
+                        0,
+                        10.0
+                    );
+                    const wheelIntersects = wheelRaycaster.intersectObjects(groundCollisionMeshes, true);
                     
-                    // 高さを即座に設定（フレームごとに確実に地面に配置）
-                    carObject.position.y = targetHeight;
-                    
-                    // デバッグ情報（最初は出力、後は削除）
-                    // console.log(`Car at height: ${targetHeight.toFixed(2)}, ground: ${groundY.toFixed(2)}`);
-                } else {
-                    // console.log(`[DEBUG] No ground intersection found in car physics loop`);
+                    if (wheelIntersects.length > 0) {
+                        wheelHeights[wheelPoint.name] = wheelIntersects[0].point.y;
+                    } else {
+                        wheelHeights[wheelPoint.name] = null;
+                        allWheelsOnGround = false;
+                    }
                 }
-            } else if (!foundGround) {
-                // console.log(`[DEBUG] foundGround=false, no ground height adjustment`);
+                
+                // 4輪のうち3輪以上が接地している場合のみ傾斜を計算
+                const onGroundCount = Object.values(wheelHeights).filter(h => h !== null).length;
+                if (onGroundCount >= 3) {
+                    // 車体の中心高さを計算（接地している輪の平均 + 微小なクリアランス）
+                    const groundedHeights = Object.values(wheelHeights).filter(h => h !== null);
+                    const baseHeight = groundedHeights.reduce((a, b) => a + b, 0) / groundedHeights.length;
+                    const centerHeight = baseHeight + 0.05; // 最小限のクリアランス
+                    carObject.position.y = centerHeight;
+                    
+                    // ピッチ角（前後傾き）を計算
+                    if (wheelHeights.FL !== null && wheelHeights.RL !== null) {
+                        const frontAvg = (wheelHeights.FL + wheelHeights.FR) / 2;
+                        const rearAvg = (wheelHeights.RL + wheelHeights.RR) / 2;
+                        const heightDiff = frontAvg - rearAvg;
+                        const pitchAngle = Math.atan2(heightDiff, wheelDistFront + wheelDistRear);
+                        carObject.rotation.x = pitchAngle;
+                    }
+                    
+                    // ロール角（左右傾き）を計算
+                    if (wheelHeights.FL !== null && wheelHeights.FR !== null) {
+                        const leftAvg = (wheelHeights.FL + wheelHeights.RL) / 2;
+                        const rightAvg = (wheelHeights.FR + wheelHeights.RR) / 2;
+                        const heightDiff = leftAvg - rightAvg;
+                        const rollAngle = Math.atan2(heightDiff, wheelDistSide * 2);
+                        
+                        // ロール角と物理的なロール（ヨー時）の合算
+                        if (!car.userData.suspensionRoll) car.userData.suspensionRoll = 0;
+                        const rollCoef = 0.08;
+                        const maxRoll = Math.PI / 12;
+                        const rollTarget = THREE.MathUtils.clamp(-state.yawRate * rollCoef, -maxRoll, maxRoll);
+                        car.userData.suspensionRoll += (rollTarget - car.userData.suspensionRoll) * 0.1;
+                        
+                        carObject.rotation.z = rollAngle + car.userData.suspensionRoll;
+                    }
+                }
             }
             
             // 衝突判定（後方）
@@ -1630,19 +2035,45 @@ function init() {
                 carBackCheckPos,
                 carBackDir,
                 0,
-                Math.max(2.0, Math.abs(state.vx) * 2)
+                Math.max(1.5, Math.abs(state.vx) * 1.5)
             );
             const carBackIntersects = carBackRaycaster.intersectObjects(cityCollisionMeshes, true);
-            if (carBackIntersects.length > 0 && carBackIntersects[0].distance < 0.8 && state.vx < -0.1) {
-                state.vx = 0;
-                state.vy = 0;
-                state.yawRate = 0; // ヨー角速度もリセット
-                // 衝突時に車を少し押し戻す
-                carObject.position.add(worldForward.clone().multiplyScalar(0.1));
+            // 後方衝突判定も距離を短縮、地面を除外
+            if (carBackIntersects.length > 0 && carBackIntersects[0].distance < 0.6) {
+                const collisionNormal = carBackIntersects[0].face.normal.clone();
+                if (Math.abs(collisionNormal.y) < 0.7) {
+                    // 衝突時は速度を大幅に減衰
+                    state.vx *= -0.15; // バウンス効果（元の15%）
+                    state.vy *= 0.3; // 横滑りも大幅に減衰
+                    state.yawRate *= 0.5; // ヨー角速度も減衰
+                    // 衝突時に車を少し押し戻す
+                    carObject.position.add(worldForward.clone().multiplyScalar(0.15));
+                }
             }
 
             const speedKmh = speed * 3.6;
-            speedDiv.innerText = `Speed: ${Math.round(speedKmh)} km/h`;
+            // バック時は「R」、前進時はギア番号を表示
+            const gearDisplay = state.throttle < 0 ? 'R' : state.currentGear;
+            const rpmDisplay = Math.round(state.engineRPM);
+            
+            // スピードメーター＋タコメーター表示（ゲージのような表示）
+            const speedBar = Math.min(30, speedKmh) / 30; // 0-300km/hのスケール (表示上30km/hまで)
+            const rpmBar = Math.min(7000, state.engineRPM) / 7000; // 0-7000 RPMのスケール
+            
+            const speedBarLength = Math.round(speedBar * 20);
+            const rpmBarLength = Math.round(rpmBar * 20);
+            
+            const speedBarStr = '█'.repeat(speedBarLength) + '░'.repeat(20 - speedBarLength);
+            const rpmBarStr = '█'.repeat(rpmBarLength) + '░'.repeat(20 - rpmBarLength);
+            
+            speedDiv.innerText = 
+                `SPEED\n${Math.round(speedKmh).toString().padStart(3)} km/h\n${speedBarStr}\n\n` +
+                `RPM\n${rpmDisplay.toString().padStart(4)} rpm\n${rpmBarStr}\n\n` +
+                `Gear: ${gearDisplay}`;
+            speedDiv.style.display = 'block';
+            
+            // === エンジン音更新（距離ベースの3Dオーディオ） ===
+            updateEngineAudio(state.engineRPM, state.throttle, carObject.position, camera.position);
             
             // 車両回転情報を表示
             const euler = new THREE.Euler();
@@ -1657,11 +2088,7 @@ function init() {
                 `Roll: ${rollDeg.toFixed(1)}°\n` +
                 `Yaw: ${yawDeg.toFixed(1)}°`;
 
-            // 乗車中の車のコライダーを即座に同期（走行中の追従性を重視）
-            if (car.colliderObject) {
-                car.colliderObject.position.copy(carObject.position);
-                car.colliderObject.quaternion.copy(carObject.quaternion);
-            }
+            // コライダーは子要素として追加されているため、位置同期は不要（自動的に親に追従）
 
             // --- カメラ追従修正 ---
             const carPos = carObject.position.clone();
