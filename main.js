@@ -270,6 +270,9 @@ function init() {
     let cars = []; // 全車両を保存する配列
     let activeCarIndex = -1; // 現在乗車している車のインデックス（-1 = 乗車なし）
     
+    // ===== 物理オブジェクト管理システム（120.glb用） =====
+    let physicsObjects = []; // 物理演算対象のオブジェクト配列
+    
     // Car オブジェクトの構造
     // {
     //   object: GLTFシーン,
@@ -485,6 +488,94 @@ function init() {
         });
     }
 
+    // 物理演算対応の読み込み関数（120.glb用）
+    function loadPhysicsModel(modelName, position, colliderName) {
+        // GLBとコライダーを両方含める親オブジェクトを作成
+        const parentObject = new THREE.Group();
+        parentObject.position.set(position.x, position.y, position.z);
+        scene.add(parentObject);
+
+        const gltfLoader = new THREE.GLTFLoader();
+        gltfLoader.load(`models/${modelName}`, function(gltf) {
+            // ビジュアルメッシュをセットアップ
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            // GLBを親オブジェクトの子として追加
+            gltf.scene.position.set(0, 0, 0);
+            parentObject.add(gltf.scene);
+            gltf.scene.scale.set(1, 1, 1);
+
+            // 物理状態を初期化（親オブジェクトを参照）
+            const physicsData = {
+                object: parentObject,
+                velocity: new THREE.Vector3(0, 0, 0),
+                angularVelocity: new THREE.Vector3(0, 0, 0),
+                mass: 5, // kg
+                gravity: -9.81, // m/s^2
+                friction: 0.98, // 空気抵抗＋地面との摩擦
+                collisionMeshes: [],
+                isActive: false, // 衝突中かどうか
+                isGrounded: false, // 接地フラグ
+                groundFrameCount: 0, // 接地フレームカウンター
+                spawnFrameCount: 0, // 生成後のフレームカウンター（地面判定遅延用）
+                isSpawning: true, // 生成直後フラグ
+                needsInitialPositioning: true // 初期位置設定フラグ
+            };
+
+            // コライダーがある場合は読み込む
+            if (colliderName) {
+                loadPhysicsCollider(colliderName, physicsData, parentObject);
+            } else {
+                // コライダーがない場合はGLBのメッシュを使用（後方互換性）
+                gltf.scene.traverse(function(child) {
+                    if (child.isMesh) {
+                        physicsData.collisionMeshes.push(child);
+                    }
+                });
+                physicsObjects.push(physicsData);
+                // 物理配列に追加後、初期位置設定をマーク
+                physicsData.needsInitialPositioning = true;
+            }
+        });
+    }
+
+    // 物理演算用コライダー読み込み関数
+    function loadPhysicsCollider(colliderName, physicsData, parentObject) {
+        const objLoader = new THREE.OBJLoader();
+        objLoader.load(`models/${colliderName}`, function(object) {
+            // コライダーを親オブジェクトの子として追加
+            object.position.set(0, 0, 0);
+            object.traverse(function(child) {
+                if (child.isMesh) {
+                    // 物理コライダーを別配列に保存（自身の検出時に除外するため）
+                    if (!physicsData.colliderMeshes) {
+                        physicsData.colliderMeshes = [];
+                    }
+                    physicsData.colliderMeshes.push(child);
+                    
+                    // 表示用：ワイヤーフレーム＆半透明で視認性を確保
+                    const wireframeMaterial = new THREE.MeshStandardMaterial({
+                        color: 0x00ff00,
+                        wireframe: true,
+                        transparent: true,
+                        opacity: 0.5,
+                        emissive: 0x00aa00
+                    });
+                    child.material = wireframeMaterial;
+                    child.visible = false; // コライダーを非表示
+                    // ※ groundCollisionMeshesには追加しない（地面判定の対象外）
+                }
+            });
+            parentObject.add(object);
+            // コライダー読み込み完了後に物理データを追加
+            physicsObjects.push(physicsData);
+        });
+    }
+
     // gt86.glb専用の読み込み・配置関数
     function loadCarModel(modelName, position) {
         const gltfLoader = new THREE.GLTFLoader();
@@ -655,8 +746,9 @@ function init() {
     }
 
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
-    loadGLBModel('120.glb', { x: 3, y: 0, z: 0 });
+    loadPhysicsModel('120.glb', { x: 3, y: 2, z: 0 }, '120_collider.obj');
 
+    loadGLBModel("120.glb", {x:0,y:0,z:90});
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
     // オフセットを調整（モデルの原点ズレを補正：自動計算）
@@ -2255,7 +2347,249 @@ function init() {
                 car.colliderObject.quaternion.slerp(car.object.quaternion, lerpAlpha);
             }
         });
+
+        // ===== 物理オブジェクトの更新 =====
+        updatePhysicsObjects(delta);
     }
+
+    // 物理オブジェクト更新関数
+    function updatePhysicsObjects(delta) {
+        if (physicsObjects.length === 0) return;
+
+        physicsObjects.forEach((physObj) => {
+            if (!physObj.object) return;
+
+            // 生成直後のカウント
+            if (physObj.isSpawning) {
+                physObj.spawnFrameCount++;
+                // 10フレーム後に生成状態を解除（この間は地面判定をスキップ）
+                if (physObj.spawnFrameCount > 10) {
+                    physObj.isSpawning = false;
+                    physObj.spawnFrameCount = 0;
+                    // 生成直後の地面判定が完了したら、初期配置フラグを解除
+                    if (physObj.needsInitialPositioning) {
+                        physObj.needsInitialPositioning = false;
+                    }
+                }
+            }
+
+            // 車との衝突検出
+            cars.forEach((car) => {
+                if (!car.object) return;
+
+                const distance = physObj.object.position.distanceTo(car.object.position);
+                const collisionDistance = 2.5; // 衝突判定距離
+
+                if (distance < collisionDistance) {
+                    // 衝突発生：物理オブジェクトに速度を付与
+                    const carSpeed = Math.sqrt(car.state.vx ** 2 + car.state.vy ** 2);
+                    
+                    if (carSpeed > 0.5) {
+                        // 車の進行方向ベクトル
+                        const forward = new THREE.Vector3(0, 0, -1);
+                        const carForward = forward.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), car.state.yaw);
+
+                        // 衝突方向（車からオブジェクトへ）
+                        const collisionDir = physObj.object.position.clone().sub(car.object.position).normalize();
+
+                        // 速度を付与（車の速度 + 衝突方向の成分）
+                        const impulseFactor = carSpeed * 0.8; // 衝突強度の係数
+                        physObj.velocity.addScaledVector(collisionDir, impulseFactor);
+                        
+                        // 上方向の速度も付与（吹っ飛ぶ効果）
+                        physObj.velocity.y += Math.abs(carSpeed) * 0.6;
+
+                        // 回転速度も付与
+                        const randomAxis = new THREE.Vector3(
+                            Math.random() - 0.5,
+                            Math.random() - 0.5,
+                            Math.random() - 0.5
+                        ).normalize();
+                        physObj.angularVelocity.addScaledVector(randomAxis, carSpeed * 1.5);
+                        
+                        physObj.isActive = true;
+                    }
+                }
+            });
+
+            // 重力適用
+            physObj.velocity.y += physObj.gravity * delta;
+
+            // 速度を位置に反映
+            physObj.object.position.addScaledVector(physObj.velocity, delta);
+
+            // 回転を適用
+            const angularVelLength = physObj.angularVelocity.length();
+            if (angularVelLength > 0.001) {
+                const rotationAxis = physObj.angularVelocity.clone().normalize();
+                const rotationAngle = angularVelLength * delta;
+                const quat = new THREE.Quaternion();
+                quat.setFromAxisAngle(rotationAxis, rotationAngle);
+                physObj.object.quaternion.multiplyQuaternions(quat, physObj.object.quaternion);
+            }
+
+            // 速度と回転速度の減衰
+            physObj.velocity.multiplyScalar(physObj.friction);
+            physObj.angularVelocity.multiplyScalar(0.95);
+
+            // 街（壁）との衝突判定
+            if (cityCollisionMeshes.length > 0) {
+                // バウンディングボックスを計算（壁衝突判定用）
+                if (!physObj.boundingBox) {
+                    physObj.boundingBox = new THREE.Box3();
+                }
+                physObj.boundingBox.setFromObject(physObj.object);
+                
+                const checkPoints = [
+                    physObj.object.position.clone(),
+                    physObj.object.position.clone().add(new THREE.Vector3(0.5, 0, 0)),
+                    physObj.object.position.clone().add(new THREE.Vector3(-0.5, 0, 0)),
+                    physObj.object.position.clone().add(new THREE.Vector3(0, 0, 0.5)),
+                    physObj.object.position.clone().add(new THREE.Vector3(0, 0, -0.5))
+                ];
+
+                for (const checkPoint of checkPoints) {
+                    // 水平方向の速度のみでレイキャスト（Y方向は無視）
+                    const horizontalVel = new THREE.Vector3(physObj.velocity.x, 0, physObj.velocity.z);
+                    const velLength = horizontalVel.length();
+                    
+                    if (velLength > 0.01) { // 水平速度がある場合のみ衝突判定
+                        const velocityDir = horizontalVel.clone().normalize();
+                        const rayLength = Math.min(velLength * delta * 2, 0.5);
+                        
+                        const raycaster = new THREE.Raycaster(checkPoint, velocityDir, 0, rayLength);
+                        const intersects = raycaster.intersectObjects(cityCollisionMeshes, true);
+
+                        if (intersects.length > 0) {
+                            // 衝突検出：水平速度のみを反射
+                            const hitNormal = intersects[0].face.normal.clone();
+                            hitNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(intersects[0].object.matrixWorld));
+
+                            // 法線のY成分を確認（壁か床/天井かの判定）
+                            const isWall = Math.abs(hitNormal.y) < 0.5; // Y成分が小さい = 壁
+                            
+                            if (isWall) {
+                                // 壁との衝突：水平方向のみを反射、Y速度は完全に無視
+                                const restitution = 0.4;
+                                
+                                // 水平法線を計算（Y成分を0にして正規化）
+                                const wallNormal = new THREE.Vector3(hitNormal.x, 0, hitNormal.z).normalize();
+                                
+                                // 水平速度の反射
+                                const horizontalVelReflect = new THREE.Vector3(physObj.velocity.x, 0, physObj.velocity.z);
+                                const dotProduct = horizontalVelReflect.dot(wallNormal);
+                                if (dotProduct < 0) {
+                                    const reflectionForce = wallNormal.clone().multiplyScalar(-2 * dotProduct * restitution);
+                                    physObj.velocity.x = reflectionForce.x;
+                                    physObj.velocity.z = reflectionForce.z;
+                                }
+
+                                // オブジェクトを衝突面から離す（バウンディングボックス考慮）
+                                // 壁の法線方向にバウンディングボックスの半幅だけ移動
+                                const bbSize = physObj.boundingBox.getSize(new THREE.Vector3());
+                                const bbHalfWidth = Math.max(Math.abs(wallNormal.x) * bbSize.x, Math.abs(wallNormal.z) * bbSize.z) / 2;
+                                const pushDistance = Math.max(0.15, bbHalfWidth + 0.05); // 最小0.15、バウンディングボックス+0.05のマージン
+                                
+                                physObj.object.position.addScaledVector(wallNormal.clone(), pushDistance);
+                                
+                                physObj.isActive = true;
+                                break; // 最初の衝突のみ処理
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 地面との衝突判定（落下の停止）- 車と同じ方式に統一
+            // 生成直後は判定をスキップ、ただし初期位置設定時は実行
+            if (groundCollisionMeshes.length > 0 && (physObj.needsInitialPositioning || !physObj.isSpawning)) {
+                // オブジェクトの中心座標を取得
+                const objCenterX = physObj.object.position.x;
+                const objCenterZ = physObj.object.position.z;
+                const objCenterY = physObj.object.position.y;
+                
+                // 回転を含めたバウンディングボックスを計算（重要：回転後の大きさを考慮）
+                if (!physObj.boundingBox) {
+                    physObj.boundingBox = new THREE.Box3();
+                }
+                physObj.boundingBox.setFromObject(physObj.object);
+                
+                const bbMinY = physObj.boundingBox.min.y;
+                
+                // 上から下へレイキャスト
+                // 初期配置時は指定されたY位置から、通常時はオブジェクト上方から
+                const rayStartY = physObj.needsInitialPositioning ? objCenterY + 10 : objCenterY + 20;
+                const rayOrigin = new THREE.Vector3(objCenterX, rayStartY, objCenterZ);
+                const downDir = new THREE.Vector3(0, -1, 0);
+                const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 100.0);
+                
+                const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
+                let groundY = null;
+                
+                if (intersects.length > 0) {
+                    groundY = intersects[0].point.y;
+                }
+                
+                // デバッグ：地面検出状況をログ出力（5秒に1回程度の頻度）
+                if (!physObj.lastDebugTime) physObj.lastDebugTime = 0;
+                physObj.lastDebugTime += delta;
+                if (physObj.lastDebugTime > 5) {
+                    console.log(`[DEBUG Physics] Initial: ${physObj.needsInitialPositioning} | ObjPos.Y: ${objCenterY.toFixed(2)} | BBminY: ${bbMinY.toFixed(2)} | RayStart: ${rayStartY.toFixed(2)} | Ground: ${groundY !== null ? groundY.toFixed(2) : 'null'} | Velocity.Y: ${physObj.velocity.y.toFixed(3)}`);
+                    physObj.lastDebugTime = 0;
+                }
+                
+                // 地面が検出された場合、オブジェクトを地面の上に配置
+                if (groundY !== null) {
+                    const minDistanceToGround = 0.05; // 地面からの最小距離（小さい値に変更）
+                    
+                    // シンプルな方式：オブジェクト中心をバウンディングボックスのオフセット分上げる
+                    const bbHeight = physObj.boundingBox.max.y - physObj.boundingBox.min.y;
+                    const bbMinOffset = objCenterY - physObj.boundingBox.min.y; // 中心から最下点までの距離
+                    
+                    // 目標：バウンディングボックスの最下点が地面より minDistanceToGround 上に来る
+                    const targetCenterY = groundY + minDistanceToGround + bbMinOffset;
+                    
+                    // 初期位置設定時は一度で配置、それ以外は徐々に調整
+                    const difference = targetCenterY - objCenterY;
+                    if (physObj.needsInitialPositioning) {
+                        // 初期位置設定時は一度で正確に配置
+                        physObj.object.position.y = targetCenterY;
+                        physObj.needsInitialPositioning = false;
+                    } else if (Math.abs(difference) > 0.01) {
+                        // 急激な変動を避けるため徐々に調整
+                        const adjustAmount = Math.sign(difference) * Math.min(Math.abs(difference), Math.abs(physObj.velocity.y * delta) + 0.5);
+                        physObj.object.position.y += adjustAmount;
+                    } else {
+                        // 差がほぼない場合は正確に配置
+                        physObj.object.position.y = targetCenterY;
+                    }
+                    
+                    // 地面に接触している場合の速度制御
+                    const speed = physObj.velocity.length();
+                    
+                    // Y速度を制限（落下速度の上限を設定）
+                    physObj.velocity.y = Math.max(physObj.velocity.y, -2.0);
+                    
+                    // 速度が小さい場合は完全に停止
+                    if (speed < 0.1) {
+                        physObj.velocity.set(0, 0, 0);
+                        physObj.angularVelocity.multiplyScalar(0.85);
+                    }
+                    
+                    physObj.isGrounded = true;
+                    physObj.groundFrameCount = 3;
+                } else {
+                    // 地面が見つからない場合
+                    physObj.isGrounded = false;
+                    physObj.groundFrameCount = 0;
+                    // ただし、Y速度の下限を設定して極端な落下を防止
+                    physObj.velocity.y = Math.max(physObj.velocity.y, -2.0);
+                }
+            }
+
+        });
+    }
+
     // ミニマップ描画関数
     function drawMinimap() {
         // プレイヤー/車の位置を取得
