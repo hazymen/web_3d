@@ -628,6 +628,7 @@ function init() {
             }
         });
     }
+    
 
     // 車をロード時に地形の高さに基づいて配置する関数
     function positionCarOnGround(carObject, x, z) {
@@ -654,7 +655,7 @@ function init() {
     }
 
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
-    loadGLBModel('71.glb', { x: 3, y: 2, z: 0 });
+    loadGLBModel('120.glb', { x: 3, y: 0, z: 0 });
 
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
