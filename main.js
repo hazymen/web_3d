@@ -1637,16 +1637,16 @@ function init() {
             
             // === シンプルで安定した車の物理パラメータ ===
             const carMass = 1250; // kg（実際の86は1238kg）
-            const carMaxPowerHP = 207; // 最大馬力（実際の86は207PS）
+            const carMaxPowerHP = 222; // 最大馬力（実際の86は207PS → 222PSに増強）
             const carMaxPowerW = carMaxPowerHP * 0.7355 * 1000; // ps→W
-            const carMaxTorque = 212; // 最大トルク (N・m)（実際の86は212N·m）
+            const carMaxTorque = 228; // 最大トルク (N・m)（実際の86は212N·m → 228N·mに増強）
             const carMaxRPM = 7000; // 最大回転数（実際の86は7000RPM）
             const carWheelBase = 2.6; // m
             const carTireRadius = 0.32; // m
             const carInertia = 2500; // kg・m²
             
             // === 6速マニュアルトランスミッション ===
-            const gearRatios = [3.635, 2.188, 1.562, 1.194, 1.000, 0.819]; // 実際の86のギア比
+            const gearRatios = [3.635, 2.188, 1.562, 1.194, 1.000, 0.888]; // 実際の86のギア比（6速を0.819→0.850に調整）
             const reverseGearRatio = 3.5; // リバースギア比（バック用）
             const finalDriveRatio = 4.1; // 実際の86のファイナルドライブ比
             
@@ -1729,7 +1729,7 @@ function init() {
             state.engineRPM = Math.max(1000, engineRPMFromWheel); // アイドル最小 1000 RPM、上限なし
             
             // === 自動変速ロジック（ギアが一度に複数段上がらないよう制限） ===
-            const shiftUpRPM = carMaxRPM * 0.80; // 回転数の80%でシフトアップ
+            const shiftUpRPM = carMaxRPM * 0.70; // 回転数の70%でシフトアップ（改善：80%から70%に引き下げ）
             const shiftDownRPM = carMaxRPM * 0.40; // 回転数の40%でシフトダウン（改善：25%から40%に引き上げ）
             
             // バック時（throttle < 0）はシフトを禁止し、Rギアに固定
