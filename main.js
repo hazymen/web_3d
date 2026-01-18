@@ -749,6 +749,7 @@ function init() {
     loadPhysicsModel('120.glb', { x: 3, y: 2, z: 0 }, '120_collider.obj');
 
     loadGLBModel("120.glb", {x:0,y:0,z:90});
+    loadGLBModel("119.glb", {x:3,y:0,z:96});
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
     // オフセットを調整（モデルの原点ズレを補正：自動計算）
