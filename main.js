@@ -1,8 +1,9 @@
 window.addEventListener("DOMContentLoaded", init);
 
 function init() {
-    const width = 1600;
-    const height = 900;
+    // ウィンドウサイズを取得（レスポンシブ対応）
+    let width = window.innerWidth;
+    let height = window.innerHeight;
 
     // === Web Audio API セットアップ ===
     const engineAudioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -1365,6 +1366,16 @@ function init() {
     function animate() {
         requestAnimationFrame(animate);
 
+        // ウィンドウリサイズに対応
+        if (window.innerWidth !== width || window.innerHeight !== height) {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            
+            renderer.setSize(width, height);
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+        }
+
         const now = performance.now();
         const deltaTime = now - lastFrameTime;
         lastFrameTime = now;
@@ -1795,7 +1806,9 @@ function init() {
             }
 
             // === 力を合算（車体座標系） ===
-            const forceX = driveForce + brakingForce + tireForceRear * Math.sin(steerAngle) + tireForceFront * Math.sin(steerAngle);
+            // 前後方向：駆動力とブレーキ力のみ。タイヤ横力は横方向（Y）のみに適用
+            const forceX = driveForce + brakingForce;
+            // 横方向：前輪ステアリングによるタイヤ横力と後輪横力
             const forceY = tireForceFront * Math.cos(steerAngle) + tireForceRear;
 
             // === 速度・ヨー角速度の更新 ===
@@ -1856,16 +1869,19 @@ function init() {
             car.userData.wheelTravelDistance += state.vx * delta;
             const wheelRotationAngle = (car.userData.wheelTravelDistance / carTireRadius) % (Math.PI * 2);
             
+            // タイヤメッシュ表示用のステア角（物理計算の反転を打ち消す：見た目は入力通りに）
+            const wheelSteerAngle = state.steer * steerMax;
+            
             // ホイールメッシュに適用（ステアリングが転がり角度に影響しないよう回転順序を工夫）
             if (car.userData.wheels.FL) {
                 car.userData.wheels.FL.rotation.order = 'YXZ';
-                car.userData.wheels.FL.rotation.y = steerAngle; // ステアリング（Y軸）
+                car.userData.wheels.FL.rotation.y = wheelSteerAngle; // ステアリング（Y軸）
                 car.userData.wheels.FL.rotation.x = wheelRotationAngle; // 転がり（X軸）
                 car.userData.wheels.FL.rotation.z = 0; // キャンバー角なし
             }
             if (car.userData.wheels.FR) {
                 car.userData.wheels.FR.rotation.order = 'YXZ';
-                car.userData.wheels.FR.rotation.y = steerAngle; // ステアリング（Y軸）
+                car.userData.wheels.FR.rotation.y = wheelSteerAngle; // ステアリング（Y軸）
                 car.userData.wheels.FR.rotation.x = wheelRotationAngle; // 転がり（X軸）
                 car.userData.wheels.FR.rotation.z = 0; // キャンバー角なし
             }
