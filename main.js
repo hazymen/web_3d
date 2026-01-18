@@ -489,7 +489,7 @@ function init() {
     }
 
     // 物理演算対応の読み込み関数（120.glb用）
-    function loadPhysicsModel(modelName, position, colliderName) {
+    function loadPhysicsModel(modelName, position, colliderName, mass = 50) {
         // GLBとコライダーを両方含める親オブジェクトを作成
         const parentObject = new THREE.Group();
         parentObject.position.set(position.x, position.y, position.z);
@@ -514,7 +514,7 @@ function init() {
                 object: parentObject,
                 velocity: new THREE.Vector3(0, 0, 0),
                 angularVelocity: new THREE.Vector3(0, 0, 0),
-                mass: 5, // kg
+                mass: mass, // kg（指定された質量を使用）
                 gravity: -9.81, // m/s^2
                 friction: 0.98, // 空気抵抗＋地面との摩擦
                 collisionMeshes: [],
@@ -763,7 +763,7 @@ function init() {
     }
 
     // loadOBJModel('ak47.obj', { x: 0, y: 1, z: 0 });
-    loadPhysicsModel('120.glb', { x: 3, y: 2, z: 0 }, '120_collider.obj');
+    loadPhysicsModel('120.glb', { x: 3, y: 2, z: 0 }, '120_collider.obj', 50); // 質量50kg
 
     loadGLBModel("120.glb", {x:0,y:0,z:90});
     loadGLBModel("119.glb", {x:3,y:0,z:96});
@@ -1141,16 +1141,23 @@ function init() {
                         const bbox = getColliderBoundingBox(physObj.colliderMeshes);
                         if (bbox.containsPoint(hitPoint)) {
                             // 物理オブジェクトに対して銃弾の衝撃を与える
-                            const impactForce = cameraDir.clone().multiplyScalar(15); // 銃弾の威力
-                            physObj.velocity.add(impactForce);
+                            // 銃弾のエネルギー：約8ジュール相当（軽い銃弾）
+                            // F=ma より加速度を計算：a = F/m = エネルギー/(質量 × 距離)
+                            const bulletEnergy = 400; // ジュール
+                            const impactDistance = 0.05; // メートル（衝撃範囲）
+                            const bulletForce = bulletEnergy / impactDistance; // 約160N
+                            const acceleration = bulletForce / physObj.mass; // a = F/m
                             
-                            // 回転も追加（ランダムな軸）
+                            const impactVelocity = cameraDir.clone().multiplyScalar(acceleration * 0.016); // 1フレーム相当で加速度適用
+                            physObj.velocity.add(impactVelocity);
+                            
+                            // 回転も追加（ランダムな軸、小さめ）
                             const randomAxis = new THREE.Vector3(
                                 Math.random() - 0.5,
                                 Math.random() - 0.5,
                                 Math.random() - 0.5
                             ).normalize();
-                            physObj.angularVelocity.add(randomAxis.multiplyScalar(8));
+                            physObj.angularVelocity.add(randomAxis.multiplyScalar(3));
                             physObj.isActive = true;
                             break;
                         }
@@ -2426,6 +2433,8 @@ function init() {
                     const carSpeed = Math.sqrt(car.state.vx ** 2 + car.state.vy ** 2);
                     
                     if (carSpeed > 0.5) {
+                        const carMass = 1250; // 車の質量（kg）
+                        
                         // 車の進行方向ベクトル
                         const forward = new THREE.Vector3(0, 0, -1);
                         const carForward = forward.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), car.state.yaw);
@@ -2433,12 +2442,28 @@ function init() {
                         // 衝突方向（車からオブジェクトへ）
                         const collisionDir = physObj.object.position.clone().sub(car.object.position).normalize();
 
-                        // 速度を付与（車の速度 + 衝突方向の成分）
-                        const impulseFactor = carSpeed * 0.8; // 衝突強度の係数
-                        physObj.velocity.addScaledVector(collisionDir, impulseFactor);
+                        // 衝突時の速度計算（より現実的なアプローチ）
+                        // GTA5レベルの吹っ飛び効果：衝突時間を考慮した加速度ベース
+                        // 衝突時間を仮定：約0.1秒の接触時間
+                        const collisionTime = 0.1; // 秒
                         
-                        // 上方向の速度も付与（吹っ飛ぶ効果）
-                        physObj.velocity.y += Math.abs(carSpeed) * 0.6;
+                        // 車がオブジェクトに与える力：F = (m × v) / t
+                        // ただし、実際の衝突では力の大部分は相互に相殺される
+                        // オブジェクト側が受ける加速度：a = (m_car / (m_car + m_obj)) × (v_car / t)
+                        const massRatio = carMass / (carMass + physObj.mass); // 質量比（0.96程度）
+                        const acceleration = massRatio * (carSpeed / collisionTime); // 加速度
+                        
+                        // 最大加速度を制限（9Gまで、現実的）
+                        const maxAcceleration = 9 * 9.81; // 9G = 88.3 m/s²
+                        const limitedAcceleration = Math.min(acceleration, maxAcceleration);
+                        
+                        // 衝突時間分の速度増加
+                        const acquiredSpeed = limitedAcceleration * collisionTime;
+                        
+                        physObj.velocity.addScaledVector(collisionDir, acquiredSpeed);
+                        
+                        // 上方向の速度も付与（吹っ飛ぶ効果、速度に比例）
+                        physObj.velocity.y += Math.abs(acquiredSpeed) * 0.5;
 
                         // 回転速度も付与
                         const randomAxis = new THREE.Vector3(
@@ -2446,7 +2471,7 @@ function init() {
                             Math.random() - 0.5,
                             Math.random() - 0.5
                         ).normalize();
-                        physObj.angularVelocity.addScaledVector(randomAxis, carSpeed * 1.5);
+                        physObj.angularVelocity.addScaledVector(randomAxis, acquiredSpeed * 0.5);
                         
                         physObj.isActive = true;
                     }
