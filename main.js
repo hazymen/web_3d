@@ -543,6 +543,23 @@ function init() {
         });
     }
 
+    // コライダーメッシュからバウンディングボックスを計算（回転に影響されない）
+    function getColliderBoundingBox(colliderMeshes) {
+        const bbox = new THREE.Box3();
+        for (const mesh of colliderMeshes) {
+            if (mesh.geometry && !mesh.geometry.boundingBox) {
+                mesh.geometry.computeBoundingBox();
+            }
+            if (mesh.geometry && mesh.geometry.boundingBox) {
+                const localBbox = mesh.geometry.boundingBox.clone();
+                // ジオメトリのローカルバウンディングボックスをワールド座標に変換
+                localBbox.applyMatrix4(mesh.matrixWorld);
+                bbox.union(localBbox);
+            }
+        }
+        return bbox;
+    }
+    
     // 物理演算用コライダー読み込み関数
     function loadPhysicsCollider(colliderName, physicsData, parentObject) {
         const objLoader = new THREE.OBJLoader();
@@ -1116,6 +1133,29 @@ function init() {
                 createBulletTrail(muzzlePos, hitPoint);
                 
                 createImpactEffect(hitPoint, hitNormal);
+                
+                // 物理オブジェクトへのダメージ判定
+                for (const physObj of physicsObjects) {
+                    if (physObj.colliderMeshes && physObj.colliderMeshes.length > 0) {
+                        // 衝突判定：hitPointが物理オブジェクトのバウンディングボックス内か確認
+                        const bbox = getColliderBoundingBox(physObj.colliderMeshes);
+                        if (bbox.containsPoint(hitPoint)) {
+                            // 物理オブジェクトに対して銃弾の衝撃を与える
+                            const impactForce = cameraDir.clone().multiplyScalar(15); // 銃弾の威力
+                            physObj.velocity.add(impactForce);
+                            
+                            // 回転も追加（ランダムな軸）
+                            const randomAxis = new THREE.Vector3(
+                                Math.random() - 0.5,
+                                Math.random() - 0.5,
+                                Math.random() - 0.5
+                            ).normalize();
+                            physObj.angularVelocity.add(randomAxis.multiplyScalar(8));
+                            physObj.isActive = true;
+                            break;
+                        }
+                    }
+                }
             }
             
             // マズルフラッシュエフェクトを銃口に生成
@@ -2435,11 +2475,15 @@ function init() {
 
             // 街（壁）との衝突判定
             if (cityCollisionMeshes.length > 0) {
-                // バウンディングボックスを計算（壁衝突判定用）
-                if (!physObj.boundingBox) {
-                    physObj.boundingBox = new THREE.Box3();
+                // バウンディングボックスをコライダーメッシュから計算（回転に影響されない）
+                if (physObj.colliderMeshes && physObj.colliderMeshes.length > 0) {
+                    physObj.boundingBox = getColliderBoundingBox(physObj.colliderMeshes);
+                } else {
+                    if (!physObj.boundingBox) {
+                        physObj.boundingBox = new THREE.Box3();
+                    }
+                    physObj.boundingBox.setFromObject(physObj.object);
                 }
-                physObj.boundingBox.setFromObject(physObj.object);
                 
                 const checkPoints = [
                     physObj.object.position.clone(),
@@ -2509,11 +2553,15 @@ function init() {
                 const objCenterZ = physObj.object.position.z;
                 const objCenterY = physObj.object.position.y;
                 
-                // 回転を含めたバウンディングボックスを計算（重要：回転後の大きさを考慮）
-                if (!physObj.boundingBox) {
-                    physObj.boundingBox = new THREE.Box3();
+                // バウンディングボックスをコライダーメッシュから計算（回転に影響されない）
+                if (physObj.colliderMeshes && physObj.colliderMeshes.length > 0) {
+                    physObj.boundingBox = getColliderBoundingBox(physObj.colliderMeshes);
+                } else {
+                    if (!physObj.boundingBox) {
+                        physObj.boundingBox = new THREE.Box3();
+                    }
+                    physObj.boundingBox.setFromObject(physObj.object);
                 }
-                physObj.boundingBox.setFromObject(physObj.object);
                 
                 const bbMinY = physObj.boundingBox.min.y;
                 
