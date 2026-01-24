@@ -903,11 +903,21 @@ function init() {
                 if (closestCarIdx >= 0) {
                     activeCarIndex = closestCarIdx;
                     isCarMode = true;
+                    // 乗車時：ドライバーレス走行フラグをリセット
+                    cars[closestCarIdx].isDriverless = false;
+                    // ドライバーレス走行状態をリセット
+                    cars[closestCarIdx].state.throttle = 0;
+                    cars[closestCarIdx].state.steer = 0;
+                    // 乗車時：銃をシーンから削除
+                    if (gunLoaded && gunObject && gunObject.parent !== null) {
+                        scene.remove(gunObject);
+                    }
                 }
             } else if (isCarMode && activeCarIndex >= 0) {
                 // 車モード時、降りる
                 isCarMode = false;
                 rotationDiv.style.display = 'none'; // 回転情報表示を非表示
+                speedDiv.style.display = 'none'; // スピード表示も非表示
                 const car = cars[activeCarIndex];
                 if (car && car.object) {
                     const carPos = car.object.position.clone();
@@ -927,8 +937,18 @@ function init() {
                     }
                     
                     controls.getObject().position.set(exitPos.x, exitHeight, exitPos.z);
+                    
+                    // === 降車時の処理：ドライバーレス走行の開始 ===
+                    // アクセルをゼロに設定（エンジンは回り続けるが、新たな加速は行わない）
+                    car.state.throttle = 0;
+                    // ハンドルをゼロに設定（真っすぐに走るように）
+                    car.state.steer = 0;
+                    // フラグを設定：ドライバーレス走行中
+                    car.isDriverless = true;
+                    // カメラビューモードをリセット（歩行モードに戻す）
+                    carViewMode = 1;
                 }
-                activeCarIndex = -1;
+                // activeCarIndexは保持し続ける（ドライバーレス走行中も物理演算を続けるため）
             }
         }
 
@@ -1714,8 +1734,8 @@ function init() {
                 }
             }
 
-            // 銃の配置（走り動作を含む）
-            if (gunLoaded && gunObject) {
+            // 銃の配置（走り動作を含む） - 歩行モード時のみ
+            if (!isCarMode && gunLoaded && gunObject) {
                 // 銃がシーンにまだ追加されていなければ追加
                 if (gunObject.parent === null) {
                     scene.add(gunObject);
@@ -1763,16 +1783,16 @@ function init() {
                     const verticalBob = Math.sin(time * 0.5) * 0.1;
                     gunObject.rotateX(verticalBob);
                 }
-                
-                gunObject.visible = true;
+            } else if (isCarMode) {
+                // 車モード時：銃をシーンから削除
+                if (gunLoaded && gunObject && gunObject.parent !== null) {
+                    scene.remove(gunObject);
+                }
             }
-
+            
             renderer.render(scene, camera);
-        } else if (isCarMode && gunLoaded && gunObject) {
-            // 車モード時は銃を非表示
-            gunObject.visible = false;
         }
-        if (isCarMode && activeCarIndex >= 0 && activeCarIndex < cars.length) {
+        if (activeCarIndex >= 0 && activeCarIndex < cars.length) {
             const car = cars[activeCarIndex];
             const carObject = car.object;
             
@@ -1810,38 +1830,44 @@ function init() {
             const state = car.state;
 
             // === 入力処理 ===
-            state.throttle = carForward ? 1 : 0;
-            
-            // Sキーの処理：バック開始フラグを使用
-            if (carBackward) {
-                if (!state.isBackingUp) {
-                    // バック開始前：速度がある場合はブレーキ、ない場合はバック開始
-                    const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
-                    if (speed > 0.5) {
-                        // 速度がある場合：ブレーキ処理
-                        state.brake = 1;
-                        state.throttle = 0;
+            // ドライバーレス走行中は入力を無視（状態は固定）
+            if (!car.isDriverless) {
+                state.throttle = carForward ? 1 : 0;
+                
+                // Sキーの処理：バック開始フラグを使用
+                if (carBackward) {
+                    if (!state.isBackingUp) {
+                        // バック開始前：速度がある場合はブレーキ、ない場合はバック開始
+                        const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
+                        if (speed > 0.5) {
+                            // 速度がある場合：ブレーキ処理
+                            state.brake = 1;
+                            state.throttle = 0;
+                        } else {
+                            // 速度が0に近い場合：バック開始
+                            state.isBackingUp = true;
+                            state.brake = 0;
+                            state.throttle = -1.0;
+                        }
                     } else {
-                        // 速度が0に近い場合：バック開始
-                        state.isBackingUp = true;
+                        // バック中：継続
                         state.brake = 0;
                         state.throttle = -1.0;
                     }
                 } else {
-                    // バック中：継続
-                    state.brake = 0;
-                    state.throttle = -1.0;
+                    // Sキーを離した：バック終了
+                    state.isBackingUp = false;
+                    state.brake = carBrake ? 1 : 0;
                 }
+                
+                let steerInput = 0;
+                if (carLeft && !carRight) steerInput = 1;
+                else if (carRight && !carLeft) steerInput = -1;
+                state.steer += (steerInput - state.steer) * 0.25;
             } else {
-                // Sキーを離した：バック終了
-                state.isBackingUp = false;
-                state.brake = carBrake ? 1 : 0;
+                // ドライバーレス走行中：steerを徐々に0に戻す（ハンドル修正）
+                state.steer += (0 - state.steer) * 0.08; // ハンドルを真っすぐに戻す速度
             }
-            
-            let steerInput = 0;
-            if (carLeft && !carRight) steerInput = 1;
-            else if (carRight && !carLeft) steerInput = -1;
-            state.steer += (steerInput - state.steer) * 0.25;
 
             const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
             const steerMax = (speed < 10) ? 0.7 : 0.3 + 0.4 * Math.max(0, 1 - (speed - 10) / 50);
@@ -1957,8 +1983,10 @@ function init() {
             state.vy += (forceY / carMass) * delta;
             
             // 摩擦（リアルな抵抗）
-            // バック時はさらに摩擦を削減
-            if (state.throttle < 0) {
+            // ドライバーレス走行中はエンジンブレーキを適用（強い抵抗）
+            if (car.isDriverless) {
+                state.vx *= 0.97; // エンジンブレーキのような強い抵抗
+            } else if (state.throttle < 0) {
                 state.vx *= 0.9999; // バック時は極めて低い抵抗
             } else {
                 state.vx *= 0.9992; // 前進時の摩擦
@@ -2227,7 +2255,8 @@ function init() {
                 `SPEED\n${Math.round(speedKmh).toString().padStart(3)} km/h\n${speedBarStr}\n\n` +
                 `RPM\n${rpmDisplay.toString().padStart(4)} rpm\n${rpmBarStr}\n\n` +
                 `Gear: ${gearDisplay}`;
-            speedDiv.style.display = 'block';
+            // 乗車中のみ表示
+            speedDiv.style.display = isCarMode ? 'block' : 'none';
             
             // === エンジン音更新（距離ベースの3Dオーディオ） ===
             updateEngineAudio(state.engineRPM, state.throttle, carObject.position, camera.position);
@@ -2239,34 +2268,48 @@ function init() {
             const rollDeg = THREE.MathUtils.radToDeg(euler.z);
             const yawDeg = THREE.MathUtils.radToDeg(euler.y);
             
-            rotationDiv.style.display = 'block';
-            rotationDiv.innerText = 
-                `Pitch: ${pitchDeg.toFixed(1)}°\n` +
-                `Roll: ${rollDeg.toFixed(1)}°\n` +
-                `Yaw: ${yawDeg.toFixed(1)}°`;
+            rotationDiv.style.display = isCarMode ? 'block' : 'none';
 
             // コライダーは子要素として追加されているため、位置同期は不要（自動的に親に追従）
 
             // --- カメラ追従修正 ---
-            const carPos = carObject.position.clone();
-            const cameraDir = worldForward.clone();
-            cameraDir.y = 0;
-            cameraDir.normalize();
+            if (isCarMode) {
+                const carPos = carObject.position.clone();
+                const cameraDir = worldForward.clone();
+                cameraDir.y = 0;
+                cameraDir.normalize();
 
-            if (carViewMode === 1) {
-                const targetOffset = cameraDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
-                const targetPos = carPos.clone().add(targetOffset);
+                if (carViewMode === 1) {
+                    const targetOffset = cameraDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
+                    const targetPos = carPos.clone().add(targetOffset);
 
-                cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * 0.04;
-                cameraFollowPos.z += (targetPos.z - cameraFollowPos.z) * 0.04;
-                cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * 0.18;
+                    cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * 0.04;
+                    cameraFollowPos.z += (targetPos.z - cameraFollowPos.z) * 0.04;
+                    cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * 0.18;
 
-                camera.position.copy(cameraFollowPos);
-                camera.lookAt(carPos);
-            } else if (carViewMode === 2) {
-                const cameraOffset = cameraDir.clone().multiplyScalar(0).add(new THREE.Vector3(0.45, 1.35, 0));
-                camera.position.copy(carPos.clone().add(cameraOffset));
-                camera.lookAt(carPos.clone().add(cameraDir.clone().multiplyScalar(10)));
+                    // === カメラコリジョン処理：建物貫通防止 ===
+                    // カメラ位置から車位置へのレイキャストで壁をチェック
+                    const raycaster = new THREE.Raycaster();
+                    const rayDir = carPos.clone().sub(cameraFollowPos).normalize();
+                    const rayLength = cameraFollowPos.distanceTo(carPos);
+                    
+                    raycaster.set(cameraFollowPos, rayDir);
+                    const intersects = raycaster.intersectObjects(cityCollisionMeshes, true);
+                    
+                    if (intersects.length > 0 && intersects[0].distance < rayLength) {
+                        // 壁に当たった場合、カメラを壁の手前に配置
+                        const hitPoint = intersects[0].point;
+                        const offset = rayDir.clone().multiplyScalar(-0.5); // 壁から0.5m手前
+                        cameraFollowPos.copy(hitPoint.clone().add(offset));
+                    }
+
+                    camera.position.copy(cameraFollowPos);
+                    camera.lookAt(carPos);
+                } else if (carViewMode === 2) {
+                    const cameraOffset = cameraDir.clone().multiplyScalar(0).add(new THREE.Vector3(0.45, 1.35, 0));
+                    camera.position.copy(carPos.clone().add(cameraOffset));
+                    camera.lookAt(carPos.clone().add(cameraDir.clone().multiplyScalar(10)));
+                }
             }
 
             renderer.render(scene, camera);
