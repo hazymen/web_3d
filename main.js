@@ -142,21 +142,23 @@ function init() {
         }
     }
 
-    // レンダラーを作成
+    // レンダラーを作成（軽量化済み）
     const canvasElement = document.querySelector('#myCanvas');
     const renderer = new THREE.WebGLRenderer({
-        antialias: true,
+        antialias: false, // アンチエイリアス無効で軽量化
         canvas: canvasElement,
+        powerPreference: 'high-performance' // 高パフォーマンスモード
     });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // pixelRatioを制限
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.BasicShadowMap; // シンプルなシャドウマップ
 
     // シーンを作成
     const scene = new THREE.Scene();
 
-    // カメラを作成
-    const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+    // カメラを作成（描画距離を最適化）
+    const camera = new THREE.PerspectiveCamera(75, width / height, 0.5, 500);
     camera.position.set(-10, 1.6, -25); // 一人称視点の高さ
 
     function setFov(fov) {
@@ -207,8 +209,8 @@ function init() {
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2); // 色と強さ
     sunLight.position.set(500, 1000, 500); // 太陽の位置（高い位置に設定）
     sunLight.castShadow = true; // 影を有効化
-    sunLight.shadow.mapSize.width = 4096;
-    sunLight.shadow.mapSize.height = 4096;
+    sunLight.shadow.mapSize.width = 1024; // 軽量化：4096→1024
+    sunLight.shadow.mapSize.height = 1024;
     
     // 影の範囲を広げる（ここを追加・調整）
     sunLight.shadow.camera.left = -500;
@@ -241,7 +243,7 @@ function init() {
     scene.add(meshFloor);
 
 
-    const skyGeometry = new THREE.SphereGeometry(1000, 8, 8);
+    const skyGeometry = new THREE.SphereGeometry(500, 6, 6); // 半径とポリゴン数を削減
     const skyMaterial = new THREE.MeshBasicMaterial({
         color: 0x87ceeb, // 空色
         side: THREE.BackSide // 内側を表示
@@ -328,6 +330,9 @@ function init() {
     let carStopped = false;
     let carStopTime = 0;
     window.carSlipAngle = 0;
+
+    // NPCキャラクター管理配列
+    const npcs = [];
 
     // 銃と弾の関連変数
     let gunObject = null;
@@ -632,6 +637,114 @@ function init() {
         });
     }
 
+    // NPCキャラクター読み込み関数（物理モデルベース）
+    function loadNPCModel(modelName, position) {
+        // 親オブジェクトを作成（物理モデルと同じ方式）
+        const parentObject = new THREE.Group();
+        parentObject.position.set(position.x, position.y, position.z);
+        scene.add(parentObject);
+
+        const gltfLoader = new THREE.GLTFLoader();
+        gltfLoader.load(`models/${modelName}`, function(gltf) {
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+
+            // GLBを親オブジェクトの子として追加（物理モデルと同じ方式）
+            gltf.scene.position.set(0, 0, 0);
+            parentObject.add(gltf.scene);
+            gltf.scene.scale.set(1, 1, 1);
+
+            // NPCオブジェクトを作成（物理モデルの機能を完全に含む）
+            const npcData = {
+                object: parentObject,
+                visualObject: gltf.scene,
+                mixer: null,
+                loaded: true,
+                colliderMeshes: [], // コライダーメッシュ配列
+                // 物理演算パラメータ（物理モデルと同一）
+                velocity: new THREE.Vector3(0, 0, 0),
+                angularVelocity: new THREE.Vector3(0, 0, 0),
+                mass: 70, // kg（成人男性の平均体重）
+                gravity: -9.81, // m/s^2
+                friction: 0.98, // 空気抵抗＋地面との摩擦
+                isActive: false, // 衝突中かどうか
+                isGrounded: false, // 接地フラグ
+                groundFrameCount: 0, // 接地フレームカウンター
+                spawnFrameCount: 0, // 生成後のフレームカウンター
+                isSpawning: true, // 生成直後フラグ
+                needsInitialPositioning: true, // 初期位置設定フラグ
+                boundingBox: null,
+                // NPC専用パラメータ
+                state: 'walking', // 'walking', 'knocked_down', 'recovering'
+                walkDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+                walkSpeed: 0.02, // 歩行速度
+                walkTimer: 0,
+                walkChangeInterval: 300, // フレーム数（方向変更間隔）
+                // 起き上がり関連
+                staticTimer: 0, // 静止判定タイマー
+                staticThreshold: 0.5, // 静止判定の速度閾値（m/s）
+                recoverDelay: 60, // 起き上がり遅延（約1秒 = 60フレーム）
+                recoverTime: 0,
+                // 保存用の初期回転（直立状態）
+                initialQuaternion: new THREE.Quaternion(0, 0, 0, 1)
+            };
+
+            // アニメーションがあれば取得
+            if (gltf.animations && gltf.animations.length > 0) {
+                npcData.mixer = new THREE.AnimationMixer(gltf.scene);
+                npcData.walkAction = npcData.mixer.clipAction(gltf.animations[0]);
+                npcData.knockDownAction = gltf.animations.length > 1 ? npcData.mixer.clipAction(gltf.animations[1]) : null;
+                npcData.walkAction.play();
+            }
+
+            npcs.push(npcData);
+            
+            // コライダーを読み込む（120_collider.objを使用）
+            loadNPCCollider('120_collider.obj', npcData, parentObject);
+        });
+    }
+    
+    // NPC用コライダー読み込み関数（物理モデルと同じ方式）
+    function loadNPCCollider(colliderName, npcData, parentObject) {
+        const objLoader = new THREE.OBJLoader();
+        
+        objLoader.load(
+            `models/${colliderName}`,
+            function(object) {
+                // コライダーを親オブジェクトの子として追加
+                object.position.set(0, 0, 0);
+                object.traverse(function(child) {
+                    if (child.isMesh) {
+                        // NPCコライダーを別配列に保存
+                        npcData.colliderMeshes.push(child);
+                        
+                        // 表示用：ワイヤーフレーム＆半透明で視認性を確保
+                        const wireframeMaterial = new THREE.MeshStandardMaterial({
+                            color: 0x0000ff,
+                            wireframe: true,
+                            transparent: true,
+                            opacity: 0.3,
+                            emissive: 0x0000aa
+                        });
+                        child.material = wireframeMaterial;
+                        child.visible = false; // コライダーを非表示
+                    }
+                });
+                parentObject.add(object);
+                // console.log('[NPC] Collider loaded:', colliderName);
+            },
+            undefined,
+            function(error) {
+                // コライダー読み込みエラー時はログのみ出力（NPCは動作継続）
+                console.warn('[NPC] Collider load error:', colliderName, error);
+            }
+        );
+    }
+
     // 車の当たり判定用OBJモデルを読み込む関数
     function loadCarColliderOBJ(objName, carIndex, position, scale = {x:1, y:1, z:1}, offset = {x:0, y:0, z:0}) {
         const objLoader = new THREE.OBJLoader();
@@ -675,9 +788,8 @@ function init() {
             // 複数メッシュがある場合は平均を取る
             if (meshCount > 0) {
                 geometryCenter.divideScalar(meshCount);
-                // コンソールに出力して、ユーザーが確認できるようにする
-                console.log(`[${objName}] Geometry Center: (${geometryCenter.x.toFixed(2)}, ${geometryCenter.y.toFixed(2)}, ${geometryCenter.z.toFixed(2)})`);
-                console.log(`[${objName}] Current Offset: (${offset.x}, ${offset.y}, ${offset.z})`);
+                // デバッグログ削除（軽量化）
+                // console.log(`[${objName}] Geometry Center: ...`);
             }
             
             // 対応する車データを更新
@@ -699,7 +811,7 @@ function init() {
                 cars[carIndex].colliderMeshes = colliderMeshes;
                 cars[carIndex].colliderLoaded = true;
                 
-                console.log(`[${objName}] Final Offset Applied: (${finalOffset.x.toFixed(2)}, ${finalOffset.y.toFixed(2)}, ${finalOffset.z.toFixed(2)})`);
+                // console.log(`[${objName}] Final Offset Applied: ...`);
             } else {
                 // 親がまだ追加されていない場合は後で追加するまで待機
                 // 最大3秒間、500ms毎に親の追加を確認
@@ -723,8 +835,6 @@ function init() {
                         cars[carIndex].colliderMeshes = colliderMeshes;
                         cars[carIndex].colliderLoaded = true;
                         clearInterval(attachCollider);
-                        
-                        console.log(`[${objName}] Final Offset Applied (delayed): (${finalOffset.x.toFixed(2)}, ${finalOffset.y.toFixed(2)}, ${finalOffset.z.toFixed(2)})`);
                     } else if (attempts >= 6) {
                         // タイムアウト：親が見つからない場合はシーンに直接追加
                         object.position.set(position.x, position.y, position.z);
@@ -750,12 +860,7 @@ function init() {
             const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
             if (intersects.length > 0) {
                 groundY = intersects[0].point.y + 0.5; // 車の底から0.5上に配置
-                console.log(`[DEBUG] Car positioned at ground Y=${groundY} (detected=${intersects[0].point.y})`);
-            } else {
-                console.log(`[DEBUG] No ground detected at (${x}, ${z})`);
             }
-        } else {
-            console.log(`[DEBUG] groundCollisionMeshes is empty!`);
         }
         
         // 車をその地面の上に配置
@@ -767,6 +872,15 @@ function init() {
 
     loadGLBModel("120.glb", {x:0,y:0,z:90});
     loadGLBModel("119.glb", {x:3,y:0,z:96});
+    
+    // NPCキャラクターを読み込む
+    loadNPCModel('121.glb', { x: 3, y: 0, z: -5 });
+    loadNPCModel('121.glb', { x: 3, y: 0, z: 10 });
+    loadNPCModel('121.glb', { x: -3, y: 0, z: 14 });
+    loadNPCModel('121.glb', { x: -27, y: 0, z: 42 });
+    loadNPCModel('121.glb', { x: -8, y: 0, z: 83 });
+    loadNPCModel('121.glb', { x: -35, y: 0, z: -58 });
+    
     // 複数の車を読み込む
     loadCarModel('gt86.glb', { x: -13, y: 0, z: -2});
     // オフセットを調整（モデルの原点ズレを補正：自動計算）
@@ -868,7 +982,6 @@ function init() {
                     meshCount++;
                 }
             });
-            console.log(`[DEBUG] city_ground.glb loaded: ${meshCount} meshes added to groundCollisionMeshes. Total: ${groundCollisionMeshes.length}`);
             gltf.scene.position.set(position.x, position.y, position.z);
             gltf.scene.scale.set(1, 1, 1);
             scene.add(gltf.scene);
@@ -1153,6 +1266,47 @@ function init() {
                 createBulletTrail(muzzlePos, hitPoint);
                 
                 createImpactEffect(hitPoint, hitNormal);
+                
+                // === NPC当たり判定 ===
+                for (let i = 0; i < npcs.length; i++) {
+                    const npc = npcs[i];
+                    const distance = npc.object.position.distanceTo(hitPoint);
+                    
+                    // NPCの近くに着弾した場合、ノックダウン
+                    if (distance < 3.0) {
+                        npc.state = 'knocked_down';
+                        npc.knockedDownTime = 0;
+                        
+                        // 銃弾の速度（射撃速度）を推定
+                        const bulletSpeed = 400; // m/s（現実的な銃弾速度）
+                        
+                        // NPCを吹き飛ばす方向を計算（NPCから着弾点への逆方向）
+                        const knockbackDir = npc.object.position.clone().sub(hitPoint).normalize();
+                        
+                        // 銃弾による吹き飛び速度（ゲームバランス重視）
+                        // 基本速度：5.0 m/s（水平） - 強化
+                        const baseKnockbackSpeed = 5.0;
+                        
+                        // 距離に応じて吹き飛ぶ力を調整（着弾点に近いほど強い）
+                        const distanceFromHit = Math.max(0.1, 3.0 - distance); // 0.1～3.0
+                        const knockbackMultiplier = distanceFromHit / 3.0; // 0.033～1.0
+                        
+                        const horizontalSpeed = baseKnockbackSpeed * knockbackMultiplier;
+                        
+                        // 速度を設定
+                        npc.velocity = knockbackDir.clone().multiplyScalar(horizontalSpeed);
+                        npc.velocity.y = 2.5; // 上方向の速度 - 強化
+                        
+                        // 回転速度も付与
+                        const randomAxis = new THREE.Vector3(
+                            Math.random() - 0.5,
+                            Math.random() - 0.5,
+                            Math.random() - 0.5
+                        ).normalize();
+                        npc.angularVelocity.copy(randomAxis.multiplyScalar(horizontalSpeed * 2.5)); // 角速度 - 強化
+                        break;
+                    }
+                }
                 
                 // 物理オブジェクトへのダメージ判定
                 for (const physObj of physicsObjects) {
@@ -1789,9 +1943,413 @@ function init() {
                     scene.remove(gunObject);
                 }
             }
-            
-            renderer.render(scene, camera);
         }
+        
+        // === NPC更新処理 ===（物理モデルベースに一新）
+        for (let i = 0; i < npcs.length; i++) {
+            const npc = npcs[i];
+            if (!npc.object) continue;
+
+            // 生成直後のカウント（物理モデルと同じ）
+            if (npc.isSpawning) {
+                npc.spawnFrameCount++;
+                if (npc.spawnFrameCount > 10) {
+                    npc.isSpawning = false;
+                    npc.spawnFrameCount = 0;
+                    if (npc.needsInitialPositioning) {
+                        npc.needsInitialPositioning = false;
+                    }
+                }
+            }
+            
+            if (npc.state === 'walking') {
+                // ===== 歩行状態 =====
+                npc.walkTimer++;
+                
+                // 一定時間ごとに進行方向を変更
+                if (npc.walkTimer > npc.walkChangeInterval) {
+                    npc.walkDirection = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+                    npc.walkTimer = 0;
+                }
+                
+                // === 車との衝突判定（歩行中） ===
+                for (let carIndex = 0; carIndex < cars.length; carIndex++) {
+                    const car = cars[carIndex];
+                    if (!car.object || !car.state) continue;
+                    
+                    const distance = npc.object.position.distanceTo(car.object.position);
+                    const collisionDistance = 2.5;
+                    
+                    if (distance < collisionDistance) {
+                        const carSpeed = Math.sqrt(car.state.vx ** 2 + car.state.vy ** 2);
+                        
+                        if (carSpeed > 0.1) {
+                            const carMass = 1250;
+                            const collisionDir = npc.object.position.clone().sub(car.object.position).normalize();
+                            
+                            const collisionTime = 0.1;
+                            const npcMass = npc.mass;
+                            const massRatio = carMass / (carMass + npcMass);
+                            const acceleration = massRatio * (carSpeed / collisionTime);
+                            
+                            const maxAcceleration = 9 * 9.81; // 9G
+                            const limitedAcceleration = Math.min(acceleration, maxAcceleration);
+                            const acquiredSpeed = limitedAcceleration * collisionTime;
+                            
+                            // ノックダウン状態へ移行
+                            npc.state = 'knocked_down';
+                            npc.staticTimer = 0;
+                            npc.velocity = collisionDir.clone().multiplyScalar(acquiredSpeed);
+                            npc.velocity.y += Math.abs(acquiredSpeed) * 0.5; // 上方向にも吹っ飛ぶ
+                            
+                            // 回転速度を付与
+                            const randomAxis = new THREE.Vector3(
+                                Math.random() - 0.5,
+                                Math.random() - 0.5,
+                                Math.random() - 0.5
+                            ).normalize();
+                            npc.angularVelocity.copy(randomAxis.multiplyScalar(acquiredSpeed * 0.5));
+                            
+                            // アニメーション停止
+                            if (npc.mixer && npc.walkAction) {
+                                npc.walkAction.stop();
+                            }
+                            
+                            // console.log('[NPC] Hit by car!');
+                            break;
+                        }
+                    }
+                }
+                
+                // === 前方の衝突判定（建物との衝突回避） ===
+                if (cityCollisionMeshes.length > 0) {
+                    const rayOrigin = npc.object.position.clone();
+                    rayOrigin.y += 1.0; // 少し上から
+                    
+                    const rayDistance = 1.5; // 先読み距離（固定値で広め）
+                    const raycaster = new THREE.Raycaster(rayOrigin, npc.walkDirection, 0, rayDistance);
+                    const intersects = raycaster.intersectObjects(cityCollisionMeshes, true);
+                    
+                    if (intersects.length > 0) {
+                        // 前方に建物がある場合、別の方向を探す
+                        // 90度右方向を試す
+                        const rightDir = new THREE.Vector3(-npc.walkDirection.z, 0, npc.walkDirection.x);
+                        const raycasterRight = new THREE.Raycaster(rayOrigin, rightDir, 0, rayDistance);
+                        if (raycasterRight.intersectObjects(cityCollisionMeshes, true).length === 0) {
+                            npc.walkDirection.copy(rightDir);
+                        } else {
+                            // 90度左方向を試す
+                            const leftDir = new THREE.Vector3(npc.walkDirection.z, 0, -npc.walkDirection.x);
+                            const raycasterLeft = new THREE.Raycaster(rayOrigin, leftDir, 0, rayDistance);
+                            if (raycasterLeft.intersectObjects(cityCollisionMeshes, true).length === 0) {
+                                npc.walkDirection.copy(leftDir);
+                            } else {
+                                // 後ろ向きに
+                                npc.walkDirection.multiplyScalar(-1);
+                            }
+                        }
+                        npc.walkTimer = 0;
+                    }
+                }
+                
+                // 歩行移動
+                const moveAmount = npc.walkDirection.clone().multiplyScalar(npc.walkSpeed);
+                npc.object.position.add(moveAmount);
+                
+                // キャラの向きを移動方向に向ける
+                const angle = Math.atan2(npc.walkDirection.x, npc.walkDirection.z);
+                npc.object.rotation.y = angle;
+                
+                // === 歩行時の地面判定 ===
+                if (groundCollisionMeshes.length > 0) {
+                    const objCenterX = npc.object.position.x;
+                    const objCenterZ = npc.object.position.z;
+                    const objCenterY = npc.object.position.y;
+                    
+                    // NPCの推定高さ（中心から足元まで）
+                    const estimatedHalfHeight = 1.0;
+                    
+                    // レイキャスト開始位置：初期配置時は高く、通常は足元から
+                    const rayStartY = npc.needsInitialPositioning ? objCenterY + 10 : objCenterY;
+                    const rayOrigin = new THREE.Vector3(objCenterX, rayStartY, objCenterZ);
+                    const downDir = new THREE.Vector3(0, -1, 0);
+                    const rayLength = npc.needsInitialPositioning ? 50.0 : (estimatedHalfHeight + 1.0);
+                    const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, rayLength);
+                    
+                    const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
+                    
+                    if (intersects.length > 0) {
+                        const groundY = intersects[0].point.y;
+                        const npcHeight = 0.05; // 地面からのオフセット
+                        const targetY = groundY + npcHeight + estimatedHalfHeight;
+                        
+                        if (npc.needsInitialPositioning) {
+                            npc.object.position.y = targetY;
+                            npc.needsInitialPositioning = false;
+                        } else {
+                            // 地面に追従（下にいる場合のみ）
+                            const currentBottomY = objCenterY - estimatedHalfHeight;
+                            if (currentBottomY < groundY + npcHeight + 0.1) {
+                                const diff = targetY - npc.object.position.y;
+                                if (Math.abs(diff) > 0.01) {
+                                    npc.object.position.y += diff * 0.3;
+                                } else {
+                                    npc.object.position.y = targetY;
+                                }
+                            }
+                        }
+                        npc.isGrounded = true;
+                    }
+                }
+                
+            } else if (npc.state === 'knocked_down') {
+                // ===== ノックダウン状態（物理オブジェクトと同じ処理） =====
+                
+                // === 重力適用 ===
+                npc.velocity.y += npc.gravity * delta;
+                
+                // === 速度を位置に反映 ===
+                npc.object.position.addScaledVector(npc.velocity, delta);
+                
+                // === 回転を適用 ===
+                const angularVelLength = npc.angularVelocity.length();
+                if (angularVelLength > 0.001) {
+                    const rotationAxis = npc.angularVelocity.clone().normalize();
+                    const rotationAngle = angularVelLength * delta;
+                    const quat = new THREE.Quaternion();
+                    quat.setFromAxisAngle(rotationAxis, rotationAngle);
+                    npc.object.quaternion.multiplyQuaternions(quat, npc.object.quaternion);
+                }
+                
+                // === 速度と回転速度の減衰 ===
+                npc.velocity.multiplyScalar(npc.friction);
+                npc.angularVelocity.multiplyScalar(0.95);
+                
+                // === 車との衝突判定（吹き飛び中も） ===
+                for (let carIndex = 0; carIndex < cars.length; carIndex++) {
+                    const car = cars[carIndex];
+                    if (!car.object || !car.state) continue;
+                    
+                    const distance = npc.object.position.distanceTo(car.object.position);
+                    const collisionDistance = 2.5;
+                    
+                    if (distance < collisionDistance) {
+                        const carSpeed = Math.sqrt(car.state.vx ** 2 + car.state.vy ** 2);
+                        
+                        if (carSpeed > 0.5) {
+                            const carMass = 1250;
+                            const collisionDir = npc.object.position.clone().sub(car.object.position).normalize();
+                            
+                            const collisionTime = 0.1;
+                            const npcMass = npc.mass;
+                            const massRatio = carMass / (carMass + npcMass);
+                            const acceleration = massRatio * (carSpeed / collisionTime);
+                            
+                            const maxAcceleration = 9 * 9.81;
+                            const limitedAcceleration = Math.min(acceleration, maxAcceleration);
+                            const acquiredSpeed = limitedAcceleration * collisionTime;
+                            
+                            npc.velocity.addScaledVector(collisionDir, acquiredSpeed);
+                            npc.velocity.y += Math.abs(acquiredSpeed) * 0.5;
+                            
+                            const randomAxis = new THREE.Vector3(
+                                Math.random() - 0.5,
+                                Math.random() - 0.5,
+                                Math.random() - 0.5
+                            ).normalize();
+                            npc.angularVelocity.addScaledVector(randomAxis, acquiredSpeed * 0.5);
+                            
+                            // 静止タイマーをリセット
+                            npc.staticTimer = 0;
+                        }
+                    }
+                }
+                
+                // === 街（壁）との衝突判定（物理オブジェクトと同じ） ===
+                if (cityCollisionMeshes.length > 0) {
+                    // バウンディングボックスをコライダーメッシュから計算
+                    if (npc.colliderMeshes && npc.colliderMeshes.length > 0) {
+                        npc.boundingBox = getColliderBoundingBox(npc.colliderMeshes);
+                    } else {
+                        if (!npc.boundingBox) {
+                            npc.boundingBox = new THREE.Box3();
+                        }
+                        npc.boundingBox.setFromObject(npc.object);
+                    }
+                    
+                    const checkPoints = [
+                        npc.object.position.clone(),
+                        npc.object.position.clone().add(new THREE.Vector3(0.5, 0, 0)),
+                        npc.object.position.clone().add(new THREE.Vector3(-0.5, 0, 0)),
+                        npc.object.position.clone().add(new THREE.Vector3(0, 0, 0.5)),
+                        npc.object.position.clone().add(new THREE.Vector3(0, 0, -0.5))
+                    ];
+                    
+                    for (const checkPoint of checkPoints) {
+                        const horizontalVel = new THREE.Vector3(npc.velocity.x, 0, npc.velocity.z);
+                        const velLength = horizontalVel.length();
+                        
+                        if (velLength > 0.01) {
+                            const velocityDir = horizontalVel.clone().normalize();
+                            const rayLength = Math.min(velLength * delta * 2, 0.5);
+                            
+                            const raycaster = new THREE.Raycaster(checkPoint, velocityDir, 0, rayLength);
+                            const intersects = raycaster.intersectObjects(cityCollisionMeshes, true);
+                            
+                            if (intersects.length > 0) {
+                                const hitNormal = intersects[0].face.normal.clone();
+                                hitNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(intersects[0].object.matrixWorld));
+                                
+                                const isWall = Math.abs(hitNormal.y) < 0.5;
+                                
+                                if (isWall) {
+                                    const restitution = 0.4;
+                                    const wallNormal = new THREE.Vector3(hitNormal.x, 0, hitNormal.z).normalize();
+                                    
+                                    const horizontalVelReflect = new THREE.Vector3(npc.velocity.x, 0, npc.velocity.z);
+                                    const dotProduct = horizontalVelReflect.dot(wallNormal);
+                                    if (dotProduct < 0) {
+                                        const reflectionForce = wallNormal.clone().multiplyScalar(-2 * dotProduct * restitution);
+                                        npc.velocity.x = reflectionForce.x;
+                                        npc.velocity.z = reflectionForce.z;
+                                    }
+                                    
+                                    // 押し出し
+                                    const bbSize = npc.boundingBox ? npc.boundingBox.getSize(new THREE.Vector3()) : new THREE.Vector3(1, 2, 1);
+                                    const bbHalfWidth = Math.max(Math.abs(wallNormal.x) * bbSize.x, Math.abs(wallNormal.z) * bbSize.z) / 2;
+                                    const pushDistance = Math.max(0.15, bbHalfWidth + 0.05);
+                                    
+                                    npc.object.position.addScaledVector(wallNormal.clone(), pushDistance);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // === 地面との衝突判定 ===
+                if (groundCollisionMeshes.length > 0) {
+                    const objCenterX = npc.object.position.x;
+                    const objCenterZ = npc.object.position.z;
+                    const objCenterY = npc.object.position.y;
+                    
+                    // NPCの推定高さ（回転している場合も考慮して小さめに）
+                    const estimatedHalfHeight = 0.5; // 横たわっている場合を考慮
+                    
+                    // レイキャスト開始位置：オブジェクトの中心から
+                    const rayStartY = objCenterY;
+                    const rayOrigin = new THREE.Vector3(objCenterX, rayStartY, objCenterZ);
+                    const downDir = new THREE.Vector3(0, -1, 0);
+                    // レイの長さを制限（屋根誤検出防止）
+                    const rayLength = estimatedHalfHeight + 2.0;
+                    const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, rayLength);
+                    
+                    const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
+                    
+                    if (intersects.length > 0) {
+                        const groundY = intersects[0].point.y;
+                        const minDistanceToGround = 0.05;
+                        
+                        // オブジェクトの最下点を地面に合わせる
+                        const targetCenterY = groundY + minDistanceToGround + estimatedHalfHeight;
+                        
+                        // オブジェクトが地面より下にある場合のみ押し上げる
+                        const currentBottomY = objCenterY - estimatedHalfHeight;
+                        if (currentBottomY < groundY + minDistanceToGround) {
+                            // 地面に接触
+                            npc.object.position.y = targetCenterY;
+                            
+                            // 下方向の速度をリセット
+                            if (npc.velocity.y < 0) {
+                                npc.velocity.y = 0;
+                            }
+                            
+                            // 地面摩擦による減衰
+                            const speed = npc.velocity.length();
+                            if (speed < 0.5) {
+                                npc.velocity.multiplyScalar(0.9);
+                                npc.angularVelocity.multiplyScalar(0.85);
+                            }
+                            
+                            npc.isGrounded = true;
+                        } else {
+                            // 地面より上にいる場合は接地していない
+                            npc.isGrounded = false;
+                        }
+                    } else {
+                        // 地面がない場合の簡易判定
+                        if (npc.object.position.y < 1.0) {
+                            npc.object.position.y = 1.0;
+                            npc.velocity.y = 0;
+                            npc.isGrounded = true;
+                        } else {
+                            npc.isGrounded = false;
+                        }
+                    }
+                }
+                
+                // === 静止判定と起き上がり ===
+                // 速度と回転速度の両方をチェック（isGroundedに依存しない）
+                const totalSpeed = npc.velocity.length();
+                const totalAngularSpeed = npc.angularVelocity.length();
+                
+                // 速度が閾値以下なら静止とみなす（横たわっていても検出可能）
+                if (totalSpeed < npc.staticThreshold && totalAngularSpeed < 1.0) {
+                    npc.staticTimer++;
+                    
+                    // 1秒（60フレーム）静止したら回復状態へ
+                    if (npc.staticTimer >= npc.recoverDelay) {
+                        npc.state = 'recovering';
+                        npc.recoverTime = 0;
+                        npc.velocity.set(0, 0, 0);
+                        npc.angularVelocity.set(0, 0, 0);
+                        // console.log('[NPC] Static detected, starting recovery');
+                    }
+                } else {
+                    // 動いている間はタイマーリセット
+                    npc.staticTimer = 0;
+                }
+                
+            } else if (npc.state === 'recovering') {
+                // ===== 回復状態（起き上がり中） =====
+                npc.recoverTime++;
+                
+                // 徐々に直立に戻す（スムーズ補間）
+                const recoverDuration = 30; // 0.5秒で起き上がり
+                const t = Math.min(npc.recoverTime / recoverDuration, 1.0);
+                
+                // イージング関数（easeOutQuad）でスムーズに
+                const eased = 1 - (1 - t) * (1 - t);
+                
+                // 現在の回転から直立状態へスラープ補間（毎フレーム進める）
+                npc.object.quaternion.slerp(npc.initialQuaternion, 0.15);
+                
+                if (npc.recoverTime >= recoverDuration) {
+                    // 起き上がり完了、歩行状態に戻す
+                    npc.state = 'walking';
+                    npc.walkTimer = 0;
+                    npc.staticTimer = 0;
+                    npc.object.quaternion.copy(npc.initialQuaternion);
+                    npc.object.rotation.set(0, 0, 0); // 回転も完全リセット
+                    npc.angularVelocity.set(0, 0, 0);
+                    
+                    // 新しい歩行方向をランダムに決定
+                    npc.walkDirection = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+                    
+                    // アニメーション再開
+                    if (npc.walkAction) {
+                        npc.walkAction.play();
+                    }
+                }
+            }
+            
+            // アニメーション更新
+            if (npc.mixer) {
+                npc.mixer.update(delta);
+            }
+        }
+        
+        renderer.render(scene, camera);
         if (activeCarIndex >= 0 && activeCarIndex < cars.length) {
             const car = cars[activeCarIndex];
             const carObject = car.object;
@@ -2613,7 +3171,7 @@ function init() {
                 }
             }
 
-            // 地面との衝突判定（落下の停止）- 車と同じ方式に統一
+            // 地面との衝突判定（落下の停止）- 誤検出防止版
             // 生成直後は判定をスキップ、ただし初期位置設定時は実行
             if (groundCollisionMeshes.length > 0 && (physObj.needsInitialPositioning || !physObj.isSpawning)) {
                 // オブジェクトの中心座標を取得
@@ -2621,24 +3179,18 @@ function init() {
                 const objCenterZ = physObj.object.position.z;
                 const objCenterY = physObj.object.position.y;
                 
-                // バウンディングボックスをコライダーメッシュから計算（回転に影響されない）
-                if (physObj.colliderMeshes && physObj.colliderMeshes.length > 0) {
-                    physObj.boundingBox = getColliderBoundingBox(physObj.colliderMeshes);
-                } else {
-                    if (!physObj.boundingBox) {
-                        physObj.boundingBox = new THREE.Box3();
-                    }
-                    physObj.boundingBox.setFromObject(physObj.object);
-                }
+                // オブジェクトの実際の最下点を推定（回転している場合も考慮）
+                // 簡易的に固定の高さを使用（人型モデルの場合約1m）
+                const estimatedHalfHeight = 1.0;
                 
-                const bbMinY = physObj.boundingBox.min.y;
-                
-                // 上から下へレイキャスト
-                // 初期配置時は指定されたY位置から、通常時はオブジェクト上方から
-                const rayStartY = physObj.needsInitialPositioning ? objCenterY + 10 : objCenterY + 20;
+                // レイキャスト開始位置：オブジェクトの中心から少し下（屋根を誤検出しない）
+                const rayStartY = physObj.needsInitialPositioning ? objCenterY + 10 : objCenterY;
                 const rayOrigin = new THREE.Vector3(objCenterX, rayStartY, objCenterZ);
                 const downDir = new THREE.Vector3(0, -1, 0);
-                const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, 100.0);
+                
+                // レイの長さを制限（初期配置時は長く、通常時は短く）
+                const rayLength = physObj.needsInitialPositioning ? 50.0 : (estimatedHalfHeight + 2.0);
+                const raycaster = new THREE.Raycaster(rayOrigin, downDir, 0, rayLength);
                 
                 const intersects = raycaster.intersectObjects(groundCollisionMeshes, true);
                 let groundY = null;
@@ -2651,56 +3203,53 @@ function init() {
                 if (!physObj.lastDebugTime) physObj.lastDebugTime = 0;
                 physObj.lastDebugTime += delta;
                 if (physObj.lastDebugTime > 5) {
-                    console.log(`[DEBUG Physics] Initial: ${physObj.needsInitialPositioning} | ObjPos.Y: ${objCenterY.toFixed(2)} | BBminY: ${bbMinY.toFixed(2)} | RayStart: ${rayStartY.toFixed(2)} | Ground: ${groundY !== null ? groundY.toFixed(2) : 'null'} | Velocity.Y: ${physObj.velocity.y.toFixed(3)}`);
+                    // デバッグログ削除（軽量化）
                     physObj.lastDebugTime = 0;
                 }
                 
                 // 地面が検出された場合、オブジェクトを地面の上に配置
                 if (groundY !== null) {
-                    const minDistanceToGround = 0.05; // 地面からの最小距離（小さい値に変更）
+                    const minDistanceToGround = 0.05; // 地面からの最小距離
                     
-                    // シンプルな方式：オブジェクト中心をバウンディングボックスのオフセット分上げる
-                    const bbHeight = physObj.boundingBox.max.y - physObj.boundingBox.min.y;
-                    const bbMinOffset = objCenterY - physObj.boundingBox.min.y; // 中心から最下点までの距離
+                    // オブジェクトの最下点を地面に合わせる
+                    const targetCenterY = groundY + minDistanceToGround + estimatedHalfHeight;
                     
-                    // 目標：バウンディングボックスの最下点が地面より minDistanceToGround 上に来る
-                    const targetCenterY = groundY + minDistanceToGround + bbMinOffset;
-                    
-                    // 初期位置設定時は一度で配置、それ以外は徐々に調整
-                    const difference = targetCenterY - objCenterY;
+                    // 初期位置設定時は一度で配置
                     if (physObj.needsInitialPositioning) {
-                        // 初期位置設定時は一度で正確に配置
                         physObj.object.position.y = targetCenterY;
                         physObj.needsInitialPositioning = false;
-                    } else if (Math.abs(difference) > 0.01) {
-                        // 急激な変動を避けるため徐々に調整
-                        const adjustAmount = Math.sign(difference) * Math.min(Math.abs(difference), Math.abs(physObj.velocity.y * delta) + 0.5);
-                        physObj.object.position.y += adjustAmount;
                     } else {
-                        // 差がほぼない場合は正確に配置
-                        physObj.object.position.y = targetCenterY;
+                        // オブジェクトが地面より下にある場合のみ押し上げる
+                        const currentBottomY = objCenterY - estimatedHalfHeight;
+                        if (currentBottomY < groundY + minDistanceToGround) {
+                            physObj.object.position.y = targetCenterY;
+                            
+                            // 下方向の速度をリセット
+                            if (physObj.velocity.y < 0) {
+                                physObj.velocity.y = 0;
+                            }
+                            
+                            // 地面摩擦による減衰
+                            const speed = physObj.velocity.length();
+                            if (speed < 0.5) {
+                                physObj.velocity.multiplyScalar(0.9);
+                                physObj.angularVelocity.multiplyScalar(0.85);
+                            }
+                            
+                            physObj.isGrounded = true;
+                        } else {
+                            // 地面より上にいる場合は接地していない
+                            physObj.isGrounded = false;
+                        }
                     }
                     
-                    // 地面に接触している場合の速度制御
-                    const speed = physObj.velocity.length();
-                    
-                    // Y速度を制限（落下速度の上限を設定）
-                    physObj.velocity.y = Math.max(physObj.velocity.y, -2.0);
-                    
-                    // 速度が小さい場合は完全に停止
-                    if (speed < 0.1) {
-                        physObj.velocity.set(0, 0, 0);
-                        physObj.angularVelocity.multiplyScalar(0.85);
-                    }
-                    
-                    physObj.isGrounded = true;
-                    physObj.groundFrameCount = 3;
+                    physObj.groundFrameCount = physObj.isGrounded ? 3 : 0;
                 } else {
                     // 地面が見つからない場合
                     physObj.isGrounded = false;
                     physObj.groundFrameCount = 0;
-                    // ただし、Y速度の下限を設定して極端な落下を防止
-                    physObj.velocity.y = Math.max(physObj.velocity.y, -2.0);
+                    // Y速度の下限を設定して極端な落下を防止
+                    physObj.velocity.y = Math.max(physObj.velocity.y, -20.0);
                 }
             }
 
