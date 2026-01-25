@@ -253,10 +253,8 @@ function init() {
 
     let isJumping = false;
     let velocityY = 0;
-    const gravity = -0.0035;      // 重力加速度（マイナス値）
-    const jumpAccel = 0.008;      // ジャンプ時に加える加速度
-    const jumpDuration = 20;     // ジャンプ加速を加えるフレーム数
-    let jumpFrame = 0;
+    const gravity = -20.0;        // 重力加速度（m/s²）
+    const jumpVelocity = 6.0;     // ジャンプ初速度（m/s）
     const groundHeight = 1.6;
 
     // ===== プレイヤースポーン設定 =====
@@ -681,13 +679,13 @@ function init() {
                 // NPC専用パラメータ
                 state: 'walking', // 'walking', 'knocked_down', 'recovering'
                 walkDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
-                walkSpeed: 0.02, // 歩行速度
+                walkSpeed: 1.2, // 歩行速度（m/s）
                 walkTimer: 0,
-                walkChangeInterval: 300, // フレーム数（方向変更間隔）
+                walkChangeInterval: 5.0, // 方向変更間隔（秒）
                 // 起き上がり関連
-                staticTimer: 0, // 静止判定タイマー
+                staticTimer: 0, // 静止判定タイマー（秒）
                 staticThreshold: 0.5, // 静止判定の速度閾値（m/s）
-                recoverDelay: 60, // 起き上がり遅延（約1秒 = 60フレーム）
+                recoverDelay: 1.0, // 起き上がり遅延（秒）
                 recoverTime: 0,
                 // 保存用の初期回転（直立状態）
                 initialQuaternion: new THREE.Quaternion(0, 0, 0, 1)
@@ -1127,8 +1125,7 @@ function init() {
                         
                         if (canJump) {
                             isJumping = true;
-                            velocityY = 0;
-                            jumpFrame = 0;
+                            velocityY = jumpVelocity; // ジャンプ初速度を設定
                         }
                     }
                     break;
@@ -1491,7 +1488,7 @@ function init() {
     camera.quaternion.setFromEuler(euler);
 
     // 移動速度を調整する変数
-    let moveSpeed = 0.12; // 走り速度に変更
+    let moveSpeed = 7.0; // 走り速度（m/s）
 
     // マウス感度（回転速度）を調整する変数
     let mouseSensitivity = 0.5; // 小さいほどゆっくり、大きいほど速い
@@ -1772,12 +1769,9 @@ function init() {
             }
             
             if (isJumping) {
-                if (jumpFrame < jumpDuration) {
-                    velocityY += jumpAccel;
-                    jumpFrame++;
-                }
-                velocityY += gravity;
-                obj.position.y += velocityY;
+                // 重力を適用（delta時間ベース）
+                velocityY += gravity * delta;
+                obj.position.y += velocityY * delta;
                 
                 // 地面との距離を検出
                 if (groundCollisionMeshes.length > 0) {
@@ -1880,9 +1874,9 @@ function init() {
                 moveVec.applyQuaternion(camera.quaternion);
                 moveVec.y = 0;
                 moveVec.normalize();
-                // 射撃中は移動速度を3分の1に制限
+                // 射撃中は移動速度を3分の1に制限（delta時間ベース）
                 const currentMoveSpeed = isShooting ? moveSpeed / 3 : moveSpeed;
-                const nextPos = currentPos.clone().add(moveVec.clone().multiplyScalar(currentMoveSpeed));
+                const nextPos = currentPos.clone().add(moveVec.clone().multiplyScalar(currentMoveSpeed * delta));
                 if (canMove(nextPos)) {
                     controls.getObject().position.copy(nextPos);
                 }
@@ -1952,8 +1946,8 @@ function init() {
 
             // 生成直後のカウント（物理モデルと同じ）
             if (npc.isSpawning) {
-                npc.spawnFrameCount++;
-                if (npc.spawnFrameCount > 10) {
+                npc.spawnFrameCount += delta; // 秒単位で加算
+                if (npc.spawnFrameCount > 0.2) { // 0.2秒後に生成状態解除
                     npc.isSpawning = false;
                     npc.spawnFrameCount = 0;
                     if (npc.needsInitialPositioning) {
@@ -1964,9 +1958,9 @@ function init() {
             
             if (npc.state === 'walking') {
                 // ===== 歩行状態 =====
-                npc.walkTimer++;
+                npc.walkTimer += delta;
                 
-                // 一定時間ごとに進行方向を変更
+                // 一定時間ごとに進行方向を変更（秒単位）
                 if (npc.walkTimer > npc.walkChangeInterval) {
                     npc.walkDirection = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
                     npc.walkTimer = 0;
@@ -2052,8 +2046,8 @@ function init() {
                     }
                 }
                 
-                // 歩行移動
-                const moveAmount = npc.walkDirection.clone().multiplyScalar(npc.walkSpeed);
+                // 歩行移動（delta時間ベース）
+                const moveAmount = npc.walkDirection.clone().multiplyScalar(npc.walkSpeed * delta);
                 npc.object.position.add(moveAmount);
                 
                 // キャラの向きを移動方向に向ける
@@ -2295,9 +2289,9 @@ function init() {
                 
                 // 速度が閾値以下なら静止とみなす（横たわっていても検出可能）
                 if (totalSpeed < npc.staticThreshold && totalAngularSpeed < 1.0) {
-                    npc.staticTimer++;
+                    npc.staticTimer += delta; // 秒単位で加算
                     
-                    // 1秒（60フレーム）静止したら回復状態へ
+                    // 指定秒間静止したら回復状態へ
                     if (npc.staticTimer >= npc.recoverDelay) {
                         npc.state = 'recovering';
                         npc.recoverTime = 0;
@@ -2312,17 +2306,19 @@ function init() {
                 
             } else if (npc.state === 'recovering') {
                 // ===== 回復状態（起き上がり中） =====
-                npc.recoverTime++;
+                npc.recoverTime += delta; // 秒単位で加算
                 
                 // 徐々に直立に戻す（スムーズ補間）
-                const recoverDuration = 30; // 0.5秒で起き上がり
+                const recoverDuration = 0.5; // 0.5秒で起き上がり
                 const t = Math.min(npc.recoverTime / recoverDuration, 1.0);
                 
                 // イージング関数（easeOutQuad）でスムーズに
                 const eased = 1 - (1 - t) * (1 - t);
                 
                 // 現在の回転から直立状態へスラープ補間（毎フレーム進める）
-                npc.object.quaternion.slerp(npc.initialQuaternion, 0.15);
+                // deltaに応じて補間速度を調整
+                const slerpFactor = Math.min(delta * 8, 0.3);
+                npc.object.quaternion.slerp(npc.initialQuaternion, slerpFactor);
                 
                 if (npc.recoverTime >= recoverDuration) {
                     // 起き上がり完了、歩行状態に戻す
@@ -2421,10 +2417,16 @@ function init() {
                 let steerInput = 0;
                 if (carLeft && !carRight) steerInput = 1;
                 else if (carRight && !carLeft) steerInput = -1;
-                state.steer += (steerInput - state.steer) * 0.25;
+                // ステア補間をdelta時間ベースに（60FPS基準で0.25 → 1秒あたり約18回の補間）
+                const steerSmoothRate = 18.0; // 1秒あたりの補間速度
+                const steerFactor = 1 - Math.exp(-steerSmoothRate * delta);
+                state.steer += (steerInput - state.steer) * steerFactor;
             } else {
                 // ドライバーレス走行中：steerを徐々に0に戻す（ハンドル修正）
-                state.steer += (0 - state.steer) * 0.08; // ハンドルを真っすぐに戻す速度
+                // delta時間ベース（60FPS基準で0.08 → 1秒あたり約5回の補間）
+                const steerReturnRate = 5.0;
+                const steerReturnFactor = 1 - Math.exp(-steerReturnRate * delta);
+                state.steer += (0 - state.steer) * steerReturnFactor;
             }
 
             const speed = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
@@ -2540,16 +2542,25 @@ function init() {
             state.vx += (forceX / carMass) * delta;
             state.vy += (forceY / carMass) * delta;
             
-            // 摩擦（リアルな抵抗）
+            // 摩擦（リアルな抵抗）- delta時間ベース
+            // 減衰率を1秒あたりの残存率として定義し、deltaで補間
             // ドライバーレス走行中はエンジンブレーキを適用（強い抵抗）
             if (car.isDriverless) {
-                state.vx *= 0.97; // エンジンブレーキのような強い抵抗
+                // 0.97^60 ≈ 0.16（1秒後に16%残存）→ 1秒あたりの減衰率
+                const engineBrakeFriction = Math.pow(0.16, delta);
+                state.vx *= engineBrakeFriction;
             } else if (state.throttle < 0) {
-                state.vx *= 0.9999; // バック時は極めて低い抵抗
+                // 0.9999^60 ≈ 0.994（1秒後に99.4%残存）
+                const backwardFriction = Math.pow(0.994, delta);
+                state.vx *= backwardFriction;
             } else {
-                state.vx *= 0.9992; // 前進時の摩擦
+                // 0.9992^60 ≈ 0.953（1秒後に95.3%残存）
+                const forwardFriction = Math.pow(0.953, delta);
+                state.vx *= forwardFriction;
             }
-            state.vy *= 0.97; // 横滑り速度の減衰
+            // 横滑り速度の減衰: 0.97^60 ≈ 0.16（1秒後に16%残存）
+            const lateralFriction = Math.pow(0.16, delta);
+            state.vy *= lateralFriction;
             
             // === バック最高速の制限 ===
             // バック時（state.throttle < 0）の最高速を10km/h（約2.78 m/s）に制限
@@ -2561,7 +2572,9 @@ function init() {
             // トルク（Ackermann幾何学に基づく）
             const torque = (carWheelBase / 2) * (tireForceFront * Math.cos(steerAngle) - tireForceRear);
             state.yawRate += (torque / carInertia) * delta;
-            state.yawRate *= 0.97; // ヨー角速度の減衰を弱める
+            // ヨー角速度の減衰: 0.97^60 ≈ 0.16（1秒後に16%残存）- delta時間ベース
+            const yawRateFriction = Math.pow(0.16, delta);
+            state.yawRate *= yawRateFriction;
             state.yaw += state.yawRate * delta;
 
             // --- 進行方向ベクトル修正（Three.js標準：Zマイナスが前方） ---
@@ -2841,9 +2854,16 @@ function init() {
                     const targetOffset = cameraDir.clone().multiplyScalar(-6).add(new THREE.Vector3(0, 3, 0));
                     const targetPos = carPos.clone().add(targetOffset);
 
-                    cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * 0.04;
-                    cameraFollowPos.z += (targetPos.z - cameraFollowPos.z) * 0.04;
-                    cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * 0.18;
+                    // カメラ追従をdelta時間ベースに（FPS非依存）
+                    // 60FPSで0.04 → 1秒あたり約2.5回の補間速度
+                    const camFollowRateXZ = 2.5;
+                    const camFollowRateY = 12.0; // 60FPSで0.18 → 1秒あたり約12回
+                    const camFactorXZ = 1 - Math.exp(-camFollowRateXZ * delta);
+                    const camFactorY = 1 - Math.exp(-camFollowRateY * delta);
+                    
+                    cameraFollowPos.x += (targetPos.x - cameraFollowPos.x) * camFactorXZ;
+                    cameraFollowPos.z += (targetPos.z - cameraFollowPos.z) * camFactorXZ;
+                    cameraFollowPos.y += (targetPos.y - cameraFollowPos.y) * camFactorY;
 
                     // === カメラコリジョン処理：建物貫通防止 ===
                     // カメラ位置から車位置へのレイキャストで壁をチェック
@@ -3010,9 +3030,9 @@ function init() {
 
             // 生成直後のカウント
             if (physObj.isSpawning) {
-                physObj.spawnFrameCount++;
-                // 10フレーム後に生成状態を解除（この間は地面判定をスキップ）
-                if (physObj.spawnFrameCount > 10) {
+                physObj.spawnFrameCount += delta; // 秒単位で加算
+                // 0.2秒後に生成状態を解除
+                if (physObj.spawnFrameCount > 0.2) {
                     physObj.isSpawning = false;
                     physObj.spawnFrameCount = 0;
                     // 生成直後の地面判定が完了したら、初期配置フラグを解除
