@@ -152,14 +152,41 @@ function init() {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // pixelRatioを制限
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.BasicShadowMap; // シンプルなシャドウマップ
+    renderer.shadowMap.type = THREE.PCFShadowMap; // PCF: 影に諧調を付ける（簡易版）
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; // 夜景向けトーンマッピング
+    renderer.toneMappingExposure = 1.0;
 
     // シーンを作成
     const scene = new THREE.Scene();
 
+    // === 昼夜フラグ ===
+    let isNightMode = false; // デフォルト：昼モード
+    
+    // === 街モデル管理（統一版） ===
+    let cityModel = null; // 高解像度モデル
+    let cityModelLow = null; // 低解像度モデル（city_lod.glb）
+    let emissiveMeshes = []; // 放射マテリアルを持つメッシュ
+    let lodMeshMap = new Map(); // メッシュマッピング: {meshName: {high: mesh, low: mesh}}
+    const LOD_DISTANCE = 100; // LOD切り替え距離（m）
+    
     // カメラを作成（描画距離を最適化）
-    const camera = new THREE.PerspectiveCamera(75, width / height, 0.5, 500);
+    const camera = new THREE.PerspectiveCamera(75, width / height, 0.5, 5000);
     camera.position.set(-10, 1.6, -25); // 一人称視点の高さ
+    
+    // === Bloom効果（ポストプロセス）のセットアップ ===
+    const composer = new THREE.EffectComposer(renderer);
+    const renderPass = new THREE.RenderPass(scene, camera);
+    composer.addPass(renderPass);
+    
+    // UnrealBloomPass: 窓の放射マテリアルを光らせる（夜モード用、軽量化版）
+    const bloomPass = new THREE.UnrealBloomPass(
+        new THREE.Vector2(width, height),
+        0.6,    // strength（光の強さ）→ 1.0から0.6に低下
+        0.3,    // radius（光の広がり）→ 0.4から0.3に縮小
+        0.98     // threshold（光り始めるしきい値）→ 0.95から0.98に引き上げ（限定的）
+    );
+    composer.bloomPass = bloomPass; // 後で有効/無効を切り替え用に保存
+    // 初期状態：昼モードなので無効
 
     function setFov(fov) {
         camera.fov = fov;
@@ -199,30 +226,40 @@ function init() {
     controls.dampingFactor = 0.2;
     */
 
-    // 環境光源を作成
+    // 環境光源を作成（昼モード設定）
     const ambientLight = new THREE.AmbientLight(0xffffff);
     ambientLight.intensity = 0.4;
     ambientLight.position.set(200,200,200)
     scene.add(ambientLight);
+    scene.ambientLight = ambientLight; // 昼夜切り替え用
 
-    // 太陽光（DirectionalLight）の追加
+    // 太陽光（DirectionalLight）の追加（昼モード設定）
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2); // 色と強さ
     sunLight.position.set(500, 1000, 500); // 太陽の位置（高い位置に設定）
     sunLight.castShadow = true; // 影を有効化
     sunLight.shadow.mapSize.width = 1024; // 軽量化：4096→1024
     sunLight.shadow.mapSize.height = 1024;
     
-    // 影の範囲を広げる（ここを追加・調整）
+    // 影の範囲を広げる
     sunLight.shadow.camera.left = -500;
     sunLight.shadow.camera.right = 500;
     sunLight.shadow.camera.top = 500;
     sunLight.shadow.camera.bottom = -500;
-    sunLight.shadow.camera.near = 1; //影の最短描画範囲
-    sunLight.shadow.camera.far = 2000; //影の最長描画範囲
+    sunLight.shadow.camera.near = 1;
+    sunLight.shadow.camera.far = 2000;
 
-    sunLight.shadow.bias = -0.001;
+    // PCFShadowMap用のバイアス最適化
+    sunLight.shadow.bias = -0.0005;
+    sunLight.shadow.radius = 2; // PCFの範囲（ソフトシャドウの諧調に影響）
     
     scene.add(sunLight);
+    scene.sunLight = sunLight; // 昼夜切り替え用
+    
+    // 夜モード用のライト設定を事前に保存
+    const nightAmbientColor = 0x1a1a2e;
+    const nightAmbientIntensity = 0.3;
+    const nightSunColor = 0x4466aa;
+    const nightSunIntensity = 0.4;
    
 
     // 光源を作成
@@ -243,13 +280,137 @@ function init() {
     scene.add(meshFloor);
 
 
-    const skyGeometry = new THREE.SphereGeometry(500, 6, 6); // 半径とポリゴン数を削減
-    const skyMaterial = new THREE.MeshBasicMaterial({
-        color: 0x87ceeb, // 空色
-        side: THREE.BackSide // 内側を表示
-    });
-    const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+    const skyGeometry = new THREE.BoxGeometry(5000, 5000, 5000); // カメラを確実に包括するサイズ
+    
+    // === 昼間用：雲のテクスチャを生成 ===
+    function generateCloudTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1024; // キューブ用に正方形に
+        canvas.height = 1024;
+        const ctx = canvas.getContext('2d');
+        
+        // より鮮やかな空色グラデーション
+        const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        gradient.addColorStop(0, '#4BA3E3');   // 上：濃い空色
+        gradient.addColorStop(0.5, '#87CEEB'); // 中央：標準的な空色
+        gradient.addColorStop(1, '#E0F4FF');   // 下：淡い水色
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // 雲を描画（複数レイヤー・複数パターン、正方形キャンバス用） 
+        const cloudLayers = [
+            { scale: 80, y: 150, alpha: 0.2, amplitude: 25 },
+            { scale: 120, y: 350, alpha: 0.15, amplitude: 35 },
+            { scale: 160, y: 550, alpha: 0.12, amplitude: 40 },
+            { scale: 200, y: 750, alpha: 0.1, amplitude: 50 }
+        ];
+        
+        // 複数レイヤーで雲を生成
+        cloudLayers.forEach((layer, layerIdx) => {
+            ctx.fillStyle = `rgba(255, 255, 255, ${layer.alpha})`;
+            ctx.strokeStyle = `rgba(255, 255, 255, ${layer.alpha * 0.8})`;
+            ctx.lineWidth = 2;
+            
+            // 複数のクラウドパターンを描画（間隔を広げて密度を低下）
+            for (let patternX = 0; patternX < canvas.width; patternX += layer.scale * 4) {
+                ctx.beginPath();
+                for (let x = patternX; x < patternX + layer.scale * 2 && x < canvas.width; x += layer.scale / 4) {
+                    const baseY = layer.y + layerIdx * 50;
+                    const y = baseY + 
+                             Math.sin(x / layer.scale + layerIdx) * layer.amplitude +
+                             Math.sin(x / (layer.scale * 0.5) + layerIdx * 2) * (layer.amplitude * 0.6) +
+                             Math.sin(x / (layer.scale * 1.5) + layerIdx * 3) * (layer.amplitude * 0.4);
+                    
+                    if (x === patternX) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.lineTo(patternX + layer.scale * 2, 0);
+                ctx.lineTo(patternX, 0);
+                ctx.closePath();
+                ctx.fill();
+            }
+        });
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
+        texture.wrapS = THREE.RepeatWrapping; // 水平方向にリピート
+        texture.wrapT = THREE.ClampToEdgeWrapping; // 垂直方向はエッジにクリップ
+        return texture;
+    }
+    
+    const cloudTexture = generateCloudTexture();
+    // テクスチャ繰り返しを調整（キューブマップ用）
+    cloudTexture.repeat.set(2, 2); // 各面で2×2の繰り返し
+    cloudTexture.offset.set(0, 0);
+    
+    // キューブの6面用マテリアル配列（昼モード）
+    const skyMaterialDay = [];
+    for (let i = 0; i < 6; i++) {
+        const textureForMat = cloudTexture; // 同じテクスチャを参照
+        const mat = new THREE.MeshBasicMaterial({ 
+            map: textureForMat,
+            depthWrite: false, // 深度テストを無効化（背景として機能）
+            depthTest: false, // 深度テスト自体を無効化
+            side: THREE.BackSide // キューブ内側からの表示
+        });
+        skyMaterialDay.push(mat);
+    }
+    
+    // キューブの6面用マテリアル配列（夜モード）
+    const skyMaterialNight = [];
+    for (let i = 0; i < 6; i++) {
+        const mat = new THREE.MeshBasicMaterial({ 
+            color: 0x0a0a1a,
+            depthWrite: false, // 深度テストを無効化（背景として機能）
+            depthTest: false, // 深度テスト自体を無効化
+            side: THREE.BackSide // キューブ内側からの表示
+        });
+        skyMaterialNight.push(mat);
+    }
+    
+    const sky = new THREE.Mesh(skyGeometry, skyMaterialDay); // 初期状態：昼モード
     scene.add(sky);
+    scene.sky = sky; // 昼夜切り替え用
+    scene.sky.renderOrder = -1000; // 最初に描画（背景として機能）
+    scene.skyMaterialDay = skyMaterialDay;
+    scene.skyMaterialNight = skyMaterialNight;
+    scene.nightSkyColor = 0x1a1a2e; // 夜空の色を保存
+    scene.daySkyColor = 0x87ceeb; // 昼空の色を保存
+
+    // === 夜空の星を追加 ===
+    const starGeometry = new THREE.BufferGeometry();
+    const starCount = 1000; // 星の数
+    const starPositions = new Float32Array(starCount * 3);
+    
+    for (let i = 0; i < starCount * 3; i += 3) {
+        // ランダムな球面座標上に星を配置
+        const theta = Math.random() * Math.PI * 2; // 方位角
+        const phi = Math.acos(Math.random() * 2 - 1); // 仰角
+        const radius = 2400; // スカイボックス内側（5000×5000×5000の内側）
+        
+        starPositions[i] = radius * Math.sin(phi) * Math.cos(theta);
+        starPositions[i + 1] = radius * Math.cos(phi);
+        starPositions[i + 2] = radius * Math.sin(phi) * Math.sin(theta);
+    }
+    
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    
+    const starMaterial = new THREE.PointsMaterial({
+        color: 0xffffff, // 白色
+        size: 8.0, // サイズを大きくして見やすく
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.9
+    });
+    
+    const stars = new THREE.Points(starGeometry, starMaterial);
+    scene.add(stars);
+    scene.stars = stars; // 昼夜切り替え用
+    stars.visible = false; // 初期状態：昼なので非表示
 
     let isJumping = false;
     let velocityY = 0;
@@ -620,8 +781,32 @@ function init() {
                 loaded: true,
                 colliderLoaded: false,
                 state: null,
-                userData: {}
+                userData: {},
+                headlights: [] // ヘッドライトを記録
             };
+
+            // === モデル内のスポットライト（ヘッドライト）を探す ===
+            gltf.scene.traverse(function(child) {
+                if (child.isLight && (child instanceof THREE.SpotLight)) {
+                    // ターゲットを車オブジェクトに追加（車の回転に追従）
+                    child.target.position.set(0, 0, -30.0); // 相対座標で前方を指す
+                    gltf.scene.add(child.target);
+                    
+                    // スポットライトの投光パラメータ最適化
+                    child.intensity = 1.0; // ライト強度を確保
+                    child.distance = 150; // 投光距離を150に設定
+                    child.angle = Math.PI / 6; // ビーム角（約30度）
+                    child.penumbra = 0.5; // ビームの柔らかさ
+                    child.decay = 2.0; // 距離による減衰
+                    
+                    carData.headlights.push(child);
+                    child.visible = false; // 初期状態：昼なので無効
+                }
+            });
+            
+            if (carData.headlights.length > 0) {
+                console.log(`💡 ${modelName}のスポットライト${carData.headlights.length}個を検出`);
+            }
 
             // アニメーションがあれば再生
             if (gltf.animations && gltf.animations.length > 0) {
@@ -943,28 +1128,281 @@ function init() {
     //     // 無効化
     // }
 
-    // city.glb自体は見た目用として配置（衝突判定も有効）
-    function loadCityModel(modelName, position) {
+    // === 統一された街モデル読み込み関数（LOD対応） ===
+    function loadCityModel() {
         const gltfLoader = new THREE.GLTFLoader();
-        gltfLoader.load(`models/${modelName}`, function(gltf) {
+        
+        // === 高解像度版（city3.glb）を読み込み ===
+        gltfLoader.load('models/city3.glb', function(gltf) {
+            let meshCount = 0;
+            emissiveMeshes = []; // グローバル配列を初期化
+            
             gltf.scene.traverse(function(child) {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
                     child.frustumCulled = true;
-                    // 町のモデルのメッシュを当たり判定用に追加（city_collider.objの代わり）
+                    child.userData.isHighRes = true; // 高解像度フラグ
                     cityCollisionMeshes.push(child);
+                    meshCount++;
+                    
+                    // === 地面・道路マテリアルの光受信を最適化 ===
+                    const meshName = child.name.toLowerCase();
+                    if (meshName.includes('ground') || meshName.includes('road') || meshName.includes('floor') || meshName.includes('pavement')) {
+                        // 地面・道路のマテリアルを改善
+                        if (child.material) {
+                            // MeshBasicMaterialなら光に応答するMeshStandardMaterialに変更
+                            if (child.material.isMeshBasicMaterial) {
+                                const oldMat = child.material;
+                                const newMat = new THREE.MeshStandardMaterial({
+                                    color: oldMat.color.getHex(),
+                                    map: oldMat.map,
+                                    roughness: 0.8, // 道路の粗さ
+                                    metalness: 0.0,
+                                    side: oldMat.side
+                                });
+                                child.material = newMat;
+                            } else if (child.material.isMeshStandardMaterial) {
+                                // MeshStandardMaterialなら光受信を強化
+                                child.material.roughness = Math.max(0.6, child.material.roughness || 0.8);
+                                child.material.metalness = Math.min(0.1, child.material.metalness || 0.0);
+                            }
+                            child.material.needsUpdate = true;
+                        }
+                    }
+                    
+                    // === 放射マテリアルを記録（昼夜切り替え用） ===
+                    if (child.material && child.material.emissive) {
+                        const hasEmissive = child.material.emissive.r > 0 || child.material.emissive.g > 0 || child.material.emissive.b > 0;
+                        if (hasEmissive) {
+                            // マテリアルを複製して独立化
+                            const mat = child.material.clone();
+                            child.material = mat;
+                            
+                            emissiveMeshes.push({
+                                mesh: child,
+                                originalEmissive: child.material.emissive.clone(),
+                                originalIntensity: child.material.emissiveIntensity || 1.0
+                            });
+                        }
+                    }
+                    
+                    // === LODマッピング用に高解像度版を記録 ===
+                    const meshName_clean = child.name.toLowerCase();
+                    if (!meshName_clean.includes('road')) { // road を除外
+                        if (!lodMeshMap.has(meshName_clean)) {
+                            lodMeshMap.set(meshName_clean, {});
+                        }
+                        lodMeshMap.get(meshName_clean).high = child;
+                    }
                 }
             });
-            gltf.scene.position.set(position.x, position.y, position.z);
+            
+            gltf.scene.position.set(0, 0.01, 0);
             gltf.scene.scale.set(1, 1, 1);
             scene.add(gltf.scene);
+            cityModel = gltf.scene;
+            cityModel.emissiveLights = []; // ライト配列を初期化
+            
+            // === 読み込み時に放射を昼間用に初期化 ===
+            emissiveMeshes.forEach(item => {
+                const mat = item.mesh.material;
+                if (mat) {
+                    // emissiveを完全に消す（黒）、強度を0に（昼間設定）
+                    mat.emissive.setHex(0x000000);
+                    mat.emissiveIntensity = 0.0;
+                    // 窓色を空色に設定
+                    mat.color.setHex(0x87ceeb);
+                    mat.needsUpdate = true;
+                }
+            });
+            
+            console.log(`✅ 街モデル読み込み完了: ${meshCount}個のメッシュ, ${emissiveMeshes.length}個が放射マテリアル`);
+            
+            // === 高解像度メッシュをvisible=trueに明示的に設定 ===
+            let highVisibleSet = 0;
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    if (child.visible !== true) {
+                        child.visible = true;
+                    }
+                    highVisibleSet++;
+                }
+            });
+            console.log(`📌 高解像度メッシュ: ${highVisibleSet}個を表示有効に設定`);
+        }, undefined, function(error) {
+            console.error('❌ 街モデル読み込みエラー:', error);
+        });
+        
+        // === 低解像度版（city_lod.glb）を読み込み ===
+        gltfLoader.load('models/city_lod.glb', function(gltf) {
+            let lodMeshCount = 0;
+            
+            // === デバッグ用：city_lod.glbのメッシュ名を出力 ===
+            console.log('📋 city_lod.glbのメッシュ一覧（すべて）：');
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    console.log(`  - ${child.name} → ${child.name.toLowerCase()}`);
+                }
+            });
+            
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    child.frustumCulled = true;
+                    child.userData.isHighRes = false; // 低解像度フラグ
+                    child.visible = false; // 初期状態では非表示
+                    
+                    // === LODマッピング用に低解像度版を記録 ===
+                    const meshName_clean = child.name.toLowerCase();
+                    if (!meshName_clean.includes('road')) { // road を除外
+                        if (!lodMeshMap.has(meshName_clean)) {
+                            lodMeshMap.set(meshName_clean, {});
+                        }
+                        lodMeshMap.get(meshName_clean).low = child;
+                    }
+                    lodMeshCount++;
+                }
+            });
+            
+            gltf.scene.position.set(0, 0.01, 0);
+            gltf.scene.scale.set(1, 1, 1);
+            scene.add(gltf.scene);
+            cityModelLow = gltf.scene;
+            
+            // === 低解像度メッシュをvisible=falseに明示的に設定 ===
+            let lowHiddenSet = 0;
+            gltf.scene.traverse(function(child) {
+                if (child.isMesh) {
+                    if (child.visible !== false) {
+                        child.visible = false;
+                    }
+                    lowHiddenSet++;
+                }
+            });
+            console.log(`📌 低解像度メッシュ: ${lowHiddenSet}個を表示無効に設定`);
+            
+            console.log(`✅ 低解像度街モデル読み込み完了: ${lodMeshCount}個のメッシュ`);
+            console.log(`📊 LODマッピング: ${lodMeshMap.size}個のメッシュペア`);
+            
+            // === デバッグ用：マッピング結果の詳細を出力 ===
+            console.log('🔍 LODマッピング詳細：');
+            let completePairs = 0;
+            let incompletePairs = 0;
+            lodMeshMap.forEach((meshPair, meshName) => {
+                if (meshPair.high && meshPair.low) {
+                    console.log(`  ✓ ${meshName}`);
+                    completePairs++;
+                } else {
+                    console.warn(`  ✗ ${meshName} (high: ${!!meshPair.high}, low: ${!!meshPair.low})`);
+                    incompletePairs++;
+                }
+            });
+            console.log(`完全なペア: ${completePairs}, 不完全なペア: ${incompletePairs}`);
+            
+            // === 初期状態サニティチェック ===
+            let initHighVisibleCount = 0;
+            let initLowVisibleCount = 0;
+            let initBothVisibleCount = 0;
+            
+            lodMeshMap.forEach((meshPair, meshName) => {
+                if (meshPair.high && meshPair.low) {
+                    if (meshPair.high.visible) initHighVisibleCount++;
+                    if (meshPair.low.visible) initLowVisibleCount++;
+                    if (meshPair.high.visible && meshPair.low.visible) initBothVisibleCount++;
+                }
+            });
+            
+            console.log(`📊 初期化完了時の状態: 高=${initHighVisibleCount}個表示, 低=${initLowVisibleCount}個表示, 両方=${initBothVisibleCount}個表示`);
+        }, undefined, function(error) {
+            console.error('❌ 低解像度街モデル読み込みエラー:', error);
         });
     }
 
-    // --- 読み込み呼び出し例 ---
-    loadCityModel('city3.glb', { x: 0, y: 0.01, z: 0 });
-    // loadCityColliderOBJ('city_collider.obj', { x: 0, y: 0.01, z: 0 }); // 無効化
+    // --- 読み込み呼び出し ---
+    loadCityModel();
+
+    // === LOD\u66f4\u65b0\u95a2\u6570\uff08\u6bce\u30d5\u30ec\u30fc\u30e0\u5442\u3076\u308a\u5b9f\u884c\uff09 ===
+    const lodUpdateCheckInterval = 100; // 100ms\u54b1\u3021\u306b\u30c1\u30a7\u30c3\u30af\uff08\u30d1\u30d5\u30a9\u30fc\u30de\u30f3\u30b9\u6700\u9069\u5316\uff09
+    let lastLODUpdateTime = 0;
+
+    function updateMeshLOD(playerPos) {
+        const currentTime = Date.now();
+        
+        // チェック間隔に達していなければスキップ
+        if (currentTime - lastLODUpdateTime < lodUpdateCheckInterval) {
+            return;
+        }
+        lastLODUpdateTime = currentTime;
+
+        console.log(`🔄 LOD更新実行 (${lodMeshMap.size}個メッシュチェック): プレイヤー位置=(${playerPos.x.toFixed(1)}, ${playerPos.y.toFixed(1)}, ${playerPos.z.toFixed(1)})`);
+
+        let switchCount = 0;
+        let highVisibleCount = 0;
+        let lowVisibleCount = 0;
+
+        lodMeshMap.forEach((meshPair, meshName) => {
+            if (!meshPair.high || !meshPair.low) {
+                return;
+            }
+
+            const highMesh = meshPair.high;
+            const lowMesh = meshPair.low;
+
+            const meshWorldPos = new THREE.Vector3();
+            highMesh.getWorldPosition(meshWorldPos);
+
+            const distance = playerPos.distanceTo(meshWorldPos);
+            const lodSwitchDistance = LOD_DISTANCE;
+            const lodHysteresis = 20;
+
+            // 前の状態を保存
+            const prevHighVisible = highMesh.visible;
+            const prevLowVisible = lowMesh.visible;
+
+            if (distance > lodSwitchDistance + lodHysteresis) {
+                // 遠距離: 低解像度に切り替え
+                highMesh.visible = false;
+                lowMesh.visible = true;
+            } else if (distance <= lodSwitchDistance - lodHysteresis) {
+                // 近距離: 高解像度に切り替え
+                highMesh.visible = true;
+                lowMesh.visible = false;
+            }
+            // 中間距離: 変更なし
+
+            // 状態変化をカウント
+            if (prevHighVisible !== highMesh.visible || prevLowVisible !== lowMesh.visible) {
+                switchCount++;
+                if (highMesh.visible) {
+                    highVisibleCount++;
+                } else {
+                    lowVisibleCount++;
+                }
+            } else {
+                // 状態が変わらない場合もカウント
+                if (highMesh.visible) {
+                    highVisibleCount++;
+                } else {
+                    lowVisibleCount++;
+                }
+            }
+        });
+
+        // === 問題検出: 両方のメッシュが表示されているかチェック ===
+        let doubleVisibleCount = 0;
+        lodMeshMap.forEach((meshPair, meshName) => {
+            if (meshPair.high && meshPair.low) {
+                if (meshPair.high.visible && meshPair.low.visible) {
+                    console.warn(`⚠️ 重複表示: ${meshName} (高=${meshPair.high.visible}, 低=${meshPair.low.visible})`);
+                    doubleVisibleCount++;
+                }
+            }
+        });
+
+        console.log(`✅ LOD処理完了: 高解像度=${highVisibleCount}個, 低解像度=${lowVisibleCount}個, 重複表示=${doubleVisibleCount}個`);
+    }
 
     // 地面モデル（city_ground.glb）を読み込む関数
     function loadGroundModel(modelName, position) {
@@ -992,8 +1430,166 @@ function init() {
     // --- 衝突判定: cityCollisionMeshes は壁用、groundCollisionMeshes は地面用 ---
 
 
+    // === 昼夜切り替え関数（統一版） ===
+    function switchDayNightMode(toNightMode) {
+        isNightMode = toNightMode;
+        
+        if (isNightMode) {
+            console.log('🌙 夜モード ON');
+            
+            // ===== 放射マテリアルを強化 =====
+            emissiveMeshes.forEach(item => {
+                const mat = item.mesh.material;
+                if (mat) {
+                    // 元の放射色と強度を1.5倍に増幅
+                    mat.emissive.copy(item.originalEmissive);
+                    mat.emissiveIntensity = item.originalIntensity * 1.5;
+                    mat.needsUpdate = true;
+                }
+            });
+            
+            // ===== PointLight追加（初回のみ、投光効果を強化） =====
+            if (cityModel.emissiveLights.length === 0) {
+                // 街灯の数を制限（全てを追加するのではなく、4個に1個のみ配置）
+                let lightCount = 0;
+                const maxLights = 40; // 最大40個に制限
+                
+                emissiveMeshes.forEach((item, index) => {
+                    // 4個に1個のみ追加（数を減らす）
+                    if (index % 4 === 0 && lightCount < maxLights) {
+                        const mesh = item.mesh;
+                        const meshWorldPos = new THREE.Vector3();
+                        mesh.getWorldPosition(meshWorldPos);
+                        
+                        const emissiveColor = item.originalEmissive.clone();
+                        // ライト強度を強化（0.035 → 0.12に増幅して周囲を照らす）
+                        const lightIntensity = item.originalIntensity * 0.12;
+                        // 投光距離を延長（120 → 250に拡大）
+                        const lightDistance = 250;
+                        
+                        const pointLight = new THREE.PointLight(emissiveColor, lightIntensity, lightDistance);
+                        pointLight.position.copy(meshWorldPos);
+                        pointLight.decay = 2.0;
+                        pointLight.castShadow = false; // シャドウ計算を完全に無効化
+                        
+                        scene.add(pointLight);
+                        cityModel.emissiveLights.push(pointLight);
+                        lightCount++;
+                    }
+                });
+                console.log(`💡 ${cityModel.emissiveLights.length}個のライト追加（投光強化版）`);
+            } else {
+                // 既存ライトを表示
+                cityModel.emissiveLights.forEach(light => {
+                    light.visible = true;
+                });
+            }
+            
+            // ===== 車のヘッドライトを有効化（シャドウなし） =====
+            cars.forEach(car => {
+                if (car && car.headlights) {
+                    car.headlights.forEach(light => {
+                        light.visible = true;
+                        // ヘッドライトのシャドウ計算を無効化（パフォーマンス優先）
+                        light.castShadow = false;
+                    });
+                }
+            });
+            console.log('🚗 車のヘッドライトON');
+            
+            // ===== Bloom効果を追加 =====
+            if (!composer.passes.includes(composer.bloomPass)) {
+                composer.addPass(composer.bloomPass);
+            }
+            
+            // ===== ライティング変更（昼→夜、スポットライト範囲も最適化） =====
+            scene.ambientLight.color.setHex(0x1a1a2e);
+            scene.ambientLight.intensity = 0.85; // 0.6 → 0.85に強化
+            scene.sunLight.color.setHex(0x4466aa);
+            scene.sunLight.intensity = 0.4;
+            
+            // スポットライトの範囲を制限してパフォーマンスを向上
+            cars.forEach(car => {
+                if (car && car.headlights) {
+                    car.headlights.forEach(light => {
+                        if (light.target) {
+                            light.distance = 80; // 光の距離を制限
+                        }
+                    });
+                }
+            });
+            
+            // ===== 空の設定を変更（夜モード） =====
+            scene.sky.material = scene.skyMaterialNight;
+            
+            // ===== 星を表示 =====
+            if (scene.stars) {
+                scene.stars.visible = true;
+            }
+            
+        } else {
+            console.log('☀️ 昼モード ON');
+            
+            // ===== マテリアル更新：放射を完全に無効化し、窓色を空色に設定 =====
+            emissiveMeshes.forEach(item => {
+                const mat = item.mesh.material;
+                if (mat) {
+                    // emissiveを完全に消す（黒）、強度を0に
+                    mat.emissive.setHex(0x000000);
+                    mat.emissiveIntensity = 0.0;
+                    
+                    // 窓色を空色（0x87ceeb）に設定
+                    mat.color.setHex(0x87ceeb);
+                    
+                    mat.needsUpdate = true;
+                }
+            });
+            
+            // ===== PointLight無効化 =====
+            if (cityModel.emissiveLights) {
+                cityModel.emissiveLights.forEach(light => {
+                    light.visible = false;
+                });
+            }
+            
+            // ===== 車のヘッドライトを無効化 =====
+            cars.forEach(car => {
+                if (car && car.headlights) {
+                    car.headlights.forEach(light => {
+                        light.visible = false;
+                    });
+                }
+            });
+            console.log('🚗 車のヘッドライトOFF');
+            
+            // ===== Bloom効果を削除 =====
+            if (composer.passes.includes(composer.bloomPass)) {
+                composer.removePass(composer.bloomPass);
+            }
+            
+            // ===== ライティング変更（夜→昼） =====
+            scene.ambientLight.color.setHex(0xffffff);
+            scene.ambientLight.intensity = 0.4;
+            scene.sunLight.color.setHex(0xffffff);
+            scene.sunLight.intensity = 1.2;
+            
+            // ===== 空の設定を変更（昼モード：雲テクスチャ） =====
+            scene.sky.material = scene.skyMaterialDay;
+            
+            // ===== 星を非表示 =====
+            if (scene.stars) {
+                scene.stars.visible = false;
+            }
+        }
+    }
+
     // Fキーで乗車・降車切り替え
     document.addEventListener('keydown', (event) => {
+        // === Nキー：昼夜切り替え ===
+        if (event.code === 'KeyN') {
+            switchDayNightMode(!isNightMode);
+        }
+        
         if (event.code === 'KeyF') {
             if (!isCarMode) {
                 // 歩行者モード時、最も近い車に乗る
@@ -1684,8 +2280,19 @@ function init() {
             height = window.innerHeight;
             
             renderer.setSize(width, height);
+            composer.setSize(width, height); // Bloom用コンポーザーもリサイズ
             camera.aspect = width / height;
             camera.updateProjectionMatrix();
+        }
+        
+        // === スカイドーム（空）をカメラ位置に追従させる ===
+        if (scene.sky) {
+            scene.sky.position.copy(camera.position);
+        }
+        
+        // === 星もカメラ位置に追従させる ===
+        if (scene.stars) {
+            scene.stars.position.copy(camera.position);
         }
 
         const now = performance.now();
@@ -1713,7 +2320,7 @@ function init() {
         if (overviewMode) {
             // 町の中心上空から見下ろす視点
             const lookTarget = new THREE.Vector3(0, 0, 0); // 町の中心（必要に応じて調整）
-            camera.position.set(0, 200, 0);
+            camera.position.set(0, 400, 0);
             camera.lookAt(lookTarget);
             camPos = camera.position;
         } else {
@@ -1733,6 +2340,17 @@ function init() {
         cars.forEach(car => {
             if (car.mixer) car.mixer.update(delta);
         });
+
+        // === LOD（Level of Detail）更新処理 ===
+        if (camPos && cityModel && cityModelLow && lodMeshMap.size > 0) {
+            updateMeshLOD(camPos);
+        } else {
+            // デバッグ: 条件をチェック
+            if (!camPos) console.warn('⚠️ camPos不足');
+            if (!cityModel) console.warn('⚠️ cityModel未読み込み');
+            if (!cityModelLow) console.warn('⚠️ cityModelLow未読み込み');
+            if (lodMeshMap.size === 0) console.warn('⚠️ lodMeshMapが空');
+        }
 
         // 乗車可能な車の判定（最も近い車をチェック）
         canEnterCar = false;
@@ -2328,6 +2946,20 @@ function init() {
                     npc.object.quaternion.copy(npc.initialQuaternion);
                     npc.object.rotation.set(0, 0, 0); // 回転も完全リセット
                     npc.angularVelocity.set(0, 0, 0);
+                    npc.velocity.set(0, 0, 0); // 速度もリセット
+                    
+                    // 地面の高さを検出してNPCを配置
+                    const groundRaycaster = new THREE.Raycaster();
+                    const rayOrigin = npc.object.position.clone();
+                    rayOrigin.y += 5; // 少し上からレイキャスト
+                    groundRaycaster.set(rayOrigin, new THREE.Vector3(0, -1, 0));
+                    groundRaycaster.far = 20;
+                    
+                    const groundIntersects = groundRaycaster.intersectObjects(cityCollisionMeshes, true);
+                    if (groundIntersects.length > 0) {
+                        // 地面の高さにNPCを配置
+                        npc.object.position.y = groundIntersects[0].point.y;
+                    }
                     
                     // 新しい歩行方向をランダムに決定
                     npc.walkDirection = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
@@ -2345,7 +2977,8 @@ function init() {
             }
         }
         
-        renderer.render(scene, camera);
+        // Bloom効果付きでレンダリング
+        composer.render();
         if (activeCarIndex >= 0 && activeCarIndex < cars.length) {
             const car = cars[activeCarIndex];
             const carObject = car.object;
@@ -2890,7 +3523,8 @@ function init() {
                 }
             }
 
-            renderer.render(scene, camera);
+            // Bloom効果付きでレンダリング
+            composer.render();
         }
         
         // マズルフラッシュの更新処理
