@@ -637,6 +637,22 @@ function init() {
                     child.receiveShadow = true;
                     // 衝突判定用に配列へ追加
                     collisionMeshes.push(child);
+                    
+                    // === 放射マテリアルを記録（昼夜切り替え用） ===
+                    if (child.material && child.material.emissive) {
+                        const hasEmissive = child.material.emissive.r > 0 || child.material.emissive.g > 0 || child.material.emissive.b > 0;
+                        if (hasEmissive) {
+                            // マテリアルを複製して独立化
+                            const mat = child.material.clone();
+                            child.material = mat;
+                            
+                            emissiveMeshes.push({
+                                mesh: child,
+                                originalEmissive: child.material.emissive.clone(),
+                                originalIntensity: child.material.emissiveIntensity || 1.0
+                            });
+                        }
+                    }
                 }
             });
             gltf.scene.position.set(position.x, position.y, position.z);
@@ -767,6 +783,22 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    
+                    // === 放射マテリアルを記録（昼夜切り替え用） ===
+                    if (child.material && child.material.emissive) {
+                        const hasEmissive = child.material.emissive.r > 0 || child.material.emissive.g > 0 || child.material.emissive.b > 0;
+                        if (hasEmissive) {
+                            // マテリアルを複製して独立化
+                            const mat = child.material.clone();
+                            child.material = mat;
+                            
+                            emissiveMeshes.push({
+                                mesh: child,
+                                originalEmissive: child.material.emissive.clone(),
+                                originalIntensity: child.material.emissiveIntensity || 1.0
+                            });
+                        }
+                    }
                 }
             });
 
@@ -835,6 +867,24 @@ function init() {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    
+                    // === 放射マテリアルを記録（昼夜切り替え用） ===
+                    if (child.material && child.material.emissive) {
+                        const hasEmissive = child.material.emissive.r > 0 || child.material.emissive.g > 0 || child.material.emissive.b > 0;
+                        if (hasEmissive) {
+                            // マテリアルを複製して独立化
+                            const mat = child.material.clone();
+                            child.material = mat;
+                            
+                            emissiveMeshes.push({
+                                mesh: child,
+                                originalEmissive: child.material.emissive.clone(),
+                                originalIntensity: child.material.emissiveIntensity || 1.0,
+                                isNPC: true, // NPCモデルフラグ
+                                modelName: modelName // モデル名を記録
+                            });
+                        }
+                    }
                 }
             });
 
@@ -1597,12 +1647,17 @@ function init() {
             emissiveMeshes.forEach(item => {
                 const mat = item.mesh.material;
                 if (mat) {
-                    // emissiveを完全に消す（黒）、強度を0に
-                    mat.emissive.setHex(0x000000);
-                    mat.emissiveIntensity = 0.0;
-                    
-                    // 窓色を空色（0x87ceeb）に設定
-                    mat.color.setHex(0x87ceeb);
+                    // === 121.glb（NPC）の場合は放射を完全に無効化 ===
+                    if (item.isNPC && item.modelName === '121.glb') {
+                        // NPCの放射は昼に完全に消す
+                        mat.emissive.setHex(0x000000);
+                        mat.emissiveIntensity = 0.0;
+                    } else {
+                        // 街の窓は空色に設定
+                        mat.emissive.setHex(0x000000);
+                        mat.emissiveIntensity = 0.0;
+                        mat.color.setHex(0x87ceeb);
+                    }
                     
                     mat.needsUpdate = true;
                 }
