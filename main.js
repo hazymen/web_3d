@@ -167,7 +167,9 @@ function init() {
     let cityModelLow = null; // 低解像度モデル（city_lod.glb）
     let emissiveMeshes = []; // 放射マテリアルを持つメッシュ
     let lodMeshMap = new Map(); // メッシュマッピング: {meshName: {high: mesh, low: mesh}}
-    const LOD_DISTANCE = 100; // LOD切り替え距離（m）
+    const LOD_DISTANCE = 50; // LOD切り替え距離（m）
+    const LOD_ENABLED = false; // false: 常にオリジナル解像度を表示
+    const LOD_DEBUG_MODE = false; // true: 常に低解像度を表示（削減効果テスト用）
     
     // カメラを作成（描画距離を最適化）
     const camera = new THREE.PerspectiveCamera(75, width / height, 0.5, 5000);
@@ -214,8 +216,8 @@ function init() {
     const rotationSpeed = 0.03;
 
     const clock = new THREE.Clock();
-    const targetFPS = 60;
-    const frameDuration = 1000 / targetFPS; // 1000ms / 60fps = 約16.67ms
+    let targetFPS = 60; // 昼モード時のデフォルトFPS
+    let frameDuration = 1000 / targetFPS; // 1000ms / 60fps = 約16.67ms
     let lastFrameTime = performance.now();
     let accumulatedTime = 0;
     
@@ -1315,6 +1317,34 @@ function init() {
             });
             
             console.log(`📊 初期化完了時の状態: 高=${initHighVisibleCount}個表示, 低=${initLowVisibleCount}個表示, 両方=${initBothVisibleCount}個表示`);
+            
+            // === デバッグ：メッシュの頂点数を比較（削減率を確認） ===
+            console.log('🔬 メッシュ削減率比較（高解像度 → 低解像度）:');
+            let totalHighVertices = 0;
+            let totalLowVertices = 0;
+            let reductionSamples = 0;
+            
+            lodMeshMap.forEach((meshPair, meshName) => {
+                if (meshPair.high && meshPair.low && meshPair.high.geometry && meshPair.low.geometry) {
+                    const highVertices = meshPair.high.geometry.attributes.position.count;
+                    const lowVertices = meshPair.low.geometry.attributes.position.count;
+                    const reduction = ((highVertices - lowVertices) / highVertices * 100).toFixed(1);
+                    
+                    totalHighVertices += highVertices;
+                    totalLowVertices += lowVertices;
+                    reductionSamples++;
+                    
+                    // 削減率が大きい（>30%）か小さい（<10%）メッシュのみ表示
+                    if (reduction > 30 || reduction < 10) {
+                        console.log(`  ${meshName}: ${highVertices} → ${lowVertices} 頂点 (削減率: ${reduction}%)`);
+                    }
+                }
+            });
+            
+            if (reductionSamples > 0) {
+                const overallReduction = ((totalHighVertices - totalLowVertices) / totalHighVertices * 100).toFixed(1);
+                console.log(`📊 総削減率: ${overallReduction}% (高: ${totalHighVertices}頂点 → 低: ${totalLowVertices}頂点, ${reductionSamples}個メッシュ対象)`);
+            }
         }, undefined, function(error) {
             console.error('❌ 低解像度街モデル読み込みエラー:', error);
         });
@@ -1343,49 +1373,78 @@ function init() {
         let lowVisibleCount = 0;
 
         lodMeshMap.forEach((meshPair, meshName) => {
-            if (!meshPair.high || !meshPair.low) {
-                return;
-            }
+            // === 完全ペア: 高↔低を距離で切り替え ===
+            if (meshPair.high && meshPair.low) {
+                const highMesh = meshPair.high;
+                const lowMesh = meshPair.low;
 
-            const highMesh = meshPair.high;
-            const lowMesh = meshPair.low;
+                const meshWorldPos = new THREE.Vector3();
+                highMesh.getWorldPosition(meshWorldPos);
 
-            const meshWorldPos = new THREE.Vector3();
-            highMesh.getWorldPosition(meshWorldPos);
+                const distance = playerPos.distanceTo(meshWorldPos);
+                const lodSwitchDistance = LOD_DISTANCE;
+                const lodHysteresis = 20;
 
-            const distance = playerPos.distanceTo(meshWorldPos);
-            const lodSwitchDistance = LOD_DISTANCE;
-            const lodHysteresis = 20;
+                // 前の状態を保存
+                const prevHighVisible = highMesh.visible;
+                const prevLowVisible = lowMesh.visible;
 
-            // 前の状態を保存
-            const prevHighVisible = highMesh.visible;
-            const prevLowVisible = lowMesh.visible;
-
-            if (distance > lodSwitchDistance + lodHysteresis) {
-                // 遠距離: 低解像度に切り替え
-                highMesh.visible = false;
-                lowMesh.visible = true;
-            } else if (distance <= lodSwitchDistance - lodHysteresis) {
-                // 近距離: 高解像度に切り替え
-                highMesh.visible = true;
-                lowMesh.visible = false;
-            }
-            // 中間距離: 変更なし
-
-            // 状態変化をカウント
-            if (prevHighVisible !== highMesh.visible || prevLowVisible !== lowMesh.visible) {
-                switchCount++;
-                if (highMesh.visible) {
-                    highVisibleCount++;
+                // === LOD無効: 常にオリジナル解像度を表示 ===
+                if (!LOD_ENABLED) {
+                    highMesh.visible = true;
+                    lowMesh.visible = false;
+                } else if (LOD_DEBUG_MODE) {
+                    // === デバッグモード: 常に低解像度を表示 ===
+                    highMesh.visible = false;
+                    lowMesh.visible = true;
                 } else {
-                    lowVisibleCount++;
+                    // 通常のLOD処理
+                    if (distance > lodSwitchDistance + lodHysteresis) {
+                        // 遠距離: 低解像度に切り替え
+                        highMesh.visible = false;
+                        lowMesh.visible = true;
+                    } else if (distance <= lodSwitchDistance - lodHysteresis) {
+                        // 近距離: 高解像度に切り替え
+                        highMesh.visible = true;
+                        lowMesh.visible = false;
+                    }
+                    // 中間距離: 変更なし
                 }
-            } else {
-                // 状態が変わらない場合もカウント
+
+                // 状態変化をカウント
+                if (prevHighVisible !== highMesh.visible || prevLowVisible !== lowMesh.visible) {
+                    switchCount++;
+                    if (highMesh.visible) {
+                        highVisibleCount++;
+                    } else {
+                        lowVisibleCount++;
+                    }
+                } else {
+                    // 状態が変わらない場合もカウント
+                    if (highMesh.visible) {
+                        highVisibleCount++;
+                    } else {
+                        lowVisibleCount++;
+                    }
+                }
+            }
+            // === 不完全ペア: 低解像度版ないので、高解像度を遠距離で非表示 ===
+            else if (meshPair.high && !meshPair.low) {
+                const highMesh = meshPair.high;
+                const meshWorldPos = new THREE.Vector3();
+                highMesh.getWorldPosition(meshWorldPos);
+                const distance = playerPos.distanceTo(meshWorldPos);
+                
+                // === LOD無効: すべてのメッシュを表示 ===
+                if (!LOD_ENABLED) {
+                    highMesh.visible = true;
+                } else {
+                    // 遠距離（LOD距離の1.5倍）で非表示にして軽量化
+                    highMesh.visible = distance < (LOD_DISTANCE * 1.5);
+                }
+                
                 if (highMesh.visible) {
                     highVisibleCount++;
-                } else {
-                    lowVisibleCount++;
                 }
             }
         });
@@ -1436,6 +1495,10 @@ function init() {
         
         if (isNightMode) {
             console.log('🌙 夜モード ON');
+            // === 夜モード時も昼モードと同じFPS制限を適用 ===
+            targetFPS = 60;
+            frameDuration = 1000 / targetFPS;
+            console.log(`⏱️ FPS制限: ${targetFPS}fps (${frameDuration.toFixed(2)}ms/フレーム)`);
             
             // ===== 放射マテリアルを強化 =====
             emissiveMeshes.forEach(item => {
@@ -1580,6 +1643,11 @@ function init() {
             if (scene.stars) {
                 scene.stars.visible = false;
             }
+            
+            // === 昼モード時もFPS制限を設定 ===
+            targetFPS = 60;
+            frameDuration = 1000 / targetFPS;
+            console.log(`⏱️ FPS制限: ${targetFPS}fps (${frameDuration.toFixed(2)}ms/フレーム)`);
         }
     }
 
@@ -2344,12 +2412,6 @@ function init() {
         // === LOD（Level of Detail）更新処理 ===
         if (camPos && cityModel && cityModelLow && lodMeshMap.size > 0) {
             updateMeshLOD(camPos);
-        } else {
-            // デバッグ: 条件をチェック
-            if (!camPos) console.warn('⚠️ camPos不足');
-            if (!cityModel) console.warn('⚠️ cityModel未読み込み');
-            if (!cityModelLow) console.warn('⚠️ cityModelLow未読み込み');
-            if (lodMeshMap.size === 0) console.warn('⚠️ lodMeshMapが空');
         }
 
         // 乗車可能な車の判定（最も近い車をチェック）
@@ -2367,6 +2429,16 @@ function init() {
                         nearestCarIndex = i;
                         canEnterCar = true;
                     }
+                }
+            }
+            
+            // === 車の距離ベース可視性管理（パフォーマンス最適化） ===
+            const CAR_VIEW_DISTANCE = 100; // 車を表示する最大距離（メートル）
+            for (let i = 0; i < cars.length; i++) {
+                if (cars[i].loaded && cars[i].object) {
+                    const dist = playerPos.distanceTo(cars[i].object.position);
+                    // 乗車可能な状態か、または距離内なら表示。それ以外は非表示
+                    cars[i].object.visible = (i === nearestCarIndex && canEnterCar) || (dist < CAR_VIEW_DISTANCE);
                 }
             }
         }
